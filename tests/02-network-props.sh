@@ -4,7 +4,8 @@
 # three loopbacks, and a couple of IP/MAC lines land in the output.
 . "$(dirname "$0")/lib.sh"
 
-out="$(./testapp)"
+# ch3 moved the dump behind a CLI command.
+out="$(./testapp --cmd 'show topology')"
 assert_contains "$out" "Topology Name = Hello World Generic Graph" "topology header"
 assert_contains "$out" "node flags : 1"        "L3_ROUTER flag (=1) set"
 assert_contains "$out" "lo addr : 122.1.1.0/32" "R0 loopback"

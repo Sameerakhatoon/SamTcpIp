@@ -3,7 +3,9 @@
 # Nodes with their wired interfaces and the link cost.
 . "$(dirname "$0")/lib.sh"
 
-out="$(./testapp)"
+# ch3 moved the dump behind a CLI command; pass `show topology` so
+# ch1's invariants (Nodes, links, costs) still get checked.
+out="$(./testapp --cmd 'show topology')"
 assert_contains "$out" "Topology Name = Hello World Generic Graph" "topology header"
 assert_contains "$out" "Node Name = R0_re"  "R0 dumped"
 assert_contains "$out" "Node Name = R1_re"  "R1 dumped"

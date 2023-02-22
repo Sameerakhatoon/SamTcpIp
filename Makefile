@@ -2,6 +2,8 @@ CC       = gcc
 CFLAGS   = -g -Wall -Wno-unused-function -I.
 OBJECTS  = build/graph.o \
            build/net.o \
+           build/cli.o \
+           build/nwcli.o \
            build/topologies.o \
            build/gluethread/glthread.o
 
@@ -10,7 +12,7 @@ all: testapp
 testapp: build/testapp.o $(OBJECTS)
 	$(CC) $(CFLAGS) build/testapp.o $(OBJECTS) -o testapp
 
-build/testapp.o: testapp.c graph.h net.h
+build/testapp.o: testapp.c graph.h net.h cli.h nwcli.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c testapp.c -o build/testapp.o
 
@@ -21,6 +23,14 @@ build/graph.o: graph.c graph.h net.h
 build/net.o: net.c net.h graph.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c net.c -o build/net.o
+
+build/cli.o: cli.c cli.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -c cli.c -o build/cli.o
+
+build/nwcli.o: nwcli.c nwcli.h cli.h graph.h net.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -c nwcli.c -o build/nwcli.o
 
 build/topologies.o: topologies.c graph.h net.h
 	@mkdir -p build
