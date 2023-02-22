@@ -5,7 +5,7 @@ Tracking the build, one chapter at a time.
 ## Part A - Foundations
 
 - [x] ch1: generic graph + glthread (Graph, Node, Link, Interface, GlThread)
-- [ ] ch2: network topology (node_nw_prop, intf_nw_props, MAC + IP)
+- [x] ch2: network topology (NodeNwProp, IntfNwProps, MAC + IP, device flags)
 - [ ] ch3: CLI integration (libcli, show topology)
 - [ ] ch4: packet exchange simulation (UDP sockets, aux info, send/recv)
 

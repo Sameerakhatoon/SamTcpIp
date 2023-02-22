@@ -34,6 +34,8 @@ Node* create_graph_node(Graph* graph, char* node_name){
     node->node_name[NODE_NAME_SIZE - 1] = '\0';
     init_glthread(&node->graph_glue);
     glthread_add_next(&graph->node_list, &node->graph_glue);
+    // ch2: zero the L3 properties (loopback off, no device-type flags).
+    init_node_nw_prop(&node->node_nw_prop);
 out:
     return node;
 }
@@ -67,6 +69,13 @@ void insert_link_between_two_nodes(Node* node1, Node* node2,
     }
     node1->intf[slot1] = &link->intf1;
     node2->intf[slot2] = &link->intf2;
+
+    // ch2: zero L3 props on both endpoints and stamp a deterministic
+    // MAC built from the owning node + interface names.
+    init_intf_nw_prop(&link->intf1.intf_nw_props);
+    init_intf_nw_prop(&link->intf2.intf_nw_props);
+    interface_assign_mac_address(&link->intf1);
+    interface_assign_mac_address(&link->intf2);
 }
 
 void dump_interface(Interface* intf){
