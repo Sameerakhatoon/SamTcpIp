@@ -7,7 +7,7 @@ Tracking the build, one chapter at a time.
 - [x] ch1: generic graph + glthread (Graph, Node, Link, Interface, GlThread)
 - [x] ch2: network topology (NodeNwProp, IntfNwProps, MAC + IP, device flags)
 - [x] ch3: CLI integration (hand-rolled command tree, show topology)
-- [ ] ch4: packet exchange simulation (UDP sockets, aux info, send/recv)
+- [x] ch4: packet exchange simulation (UDP sockets, aux info, send/recv)
 
 ## Part B - TCP/IP
 

@@ -34,10 +34,14 @@ struct Link {
 };
 
 struct Node {
-    char       node_name[NODE_NAME_SIZE];
-    Interface* intf[MAX_INTF_PER_NODE];
-    GlThread   graph_glue;           // hangs on Graph.node_list
-    NodeNwProp node_nw_prop;         // ch2
+    char         node_name[NODE_NAME_SIZE];
+    Interface*   intf[MAX_INTF_PER_NODE];
+    GlThread     graph_glue;         // hangs on Graph.node_list
+    // ch4: each Node owns a bound UDP socket; the simulator routes
+    // packets between nodes by sendto() to the peer's port.
+    unsigned int udp_port_number;
+    int          udp_sock_fd;
+    NodeNwProp   node_nw_prop;       // ch2
 };
 
 GLTHREAD_TO_STRUCT(graph_glue_to_node, Node, graph_glue);

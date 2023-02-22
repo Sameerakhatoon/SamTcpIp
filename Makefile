@@ -1,16 +1,20 @@
 CC       = gcc
 CFLAGS   = -g -Wall -Wno-unused-function -I.
+LDLIBS   = -lpthread
 OBJECTS  = build/graph.o \
            build/net.o \
            build/cli.o \
            build/nwcli.o \
+           build/comm.o \
+           build/Layer2/layer2.o \
+           build/Layer3/layer3.o \
            build/topologies.o \
            build/gluethread/glthread.o
 
 all: testapp
 
 testapp: build/testapp.o $(OBJECTS)
-	$(CC) $(CFLAGS) build/testapp.o $(OBJECTS) -o testapp
+	$(CC) $(CFLAGS) build/testapp.o $(OBJECTS) -o testapp $(LDLIBS)
 
 build/testapp.o: testapp.c graph.h net.h cli.h nwcli.h
 	@mkdir -p build
@@ -28,9 +32,21 @@ build/cli.o: cli.c cli.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c cli.c -o build/cli.o
 
-build/nwcli.o: nwcli.c nwcli.h cli.h graph.h net.h
+build/nwcli.o: nwcli.c nwcli.h cli.h graph.h net.h comm.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c nwcli.c -o build/nwcli.o
+
+build/comm.o: comm.c comm.h graph.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -c comm.c -o build/comm.o
+
+build/Layer2/layer2.o: Layer2/layer2.c graph.h
+	@mkdir -p build/Layer2
+	$(CC) $(CFLAGS) -c Layer2/layer2.c -o build/Layer2/layer2.o
+
+build/Layer3/layer3.o: Layer3/layer3.c graph.h
+	@mkdir -p build/Layer3
+	$(CC) $(CFLAGS) -c Layer3/layer3.c -o build/Layer3/layer3.o
 
 build/topologies.o: topologies.c graph.h net.h
 	@mkdir -p build

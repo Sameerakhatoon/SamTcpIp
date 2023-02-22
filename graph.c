@@ -13,6 +13,10 @@ void   dump_graph(Graph* graph);
 void   dump_node(Node* node);
 void   dump_interface(Interface* intf);
 
+// ch4: bound when Nodes are created so the receiver thread can
+// select() across all of them. Defined in comm.c.
+extern void init_udp_socket(Node* node);
+
 Graph* create_new_graph(char* topology_name){
     Graph* graph = calloc(1, sizeof(Graph));
     if(!graph){
@@ -36,6 +40,9 @@ Node* create_graph_node(Graph* graph, char* node_name){
     glthread_add_next(&graph->node_list, &node->graph_glue);
     // ch2: zero the L3 properties (loopback off, no device-type flags).
     init_node_nw_prop(&node->node_nw_prop);
+    // ch4: bring up the Node's UDP socket so the simulator can
+    // route packets to it.
+    init_udp_socket(node);
 out:
     return node;
 }
