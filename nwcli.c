@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include "Layer2/layer2.h"
 #include "cli.h"
 #include "comm.h"
 #include "graph.h"
@@ -10,7 +11,9 @@
 // Forward declarations.
 static Node* find_node_by_name(const char* name);
 static int   show_topology_handler(int argc, char** argv);
+static int   show_node_arp_handler(int argc, char** argv);
 static int   run_send_handler(int argc, char** argv);
+static int   run_node_resolve_arp_handler(int argc, char** argv);
 void         nwcli_install(Graph* topo);
 
 // The CLI tree only ever needs a single Graph (the topology built at
@@ -38,10 +41,22 @@ static int show_topology_handler(int argc, char** argv){
     return 0;
 }
 
-// ch4: `run send <node> <if> <payload>` - look up the named Node
-// and Interface, push the payload out through it. Sleep briefly
-// after so the (detached) receiver thread can print before the
-// CLI returns to the caller.
+// ch5: `show node <node-name> arp` - dump the per-Node ARP cache.
+static int show_node_arp_handler(int argc, char** argv){
+    if(argc != 1){
+        fprintf(stderr, "show node arp: expected <node>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    dump_arp_table(NODE_ARP_TABLE(node));
+    return 0;
+}
+
+// ch4: `run send <node> <if> <payload>`.
 static int run_send_handler(int argc, char** argv){
     if(argc != 3){
         fprintf(stderr, "run send: expected <node> <if> <payload>\n");
@@ -62,22 +77,66 @@ static int run_send_handler(int argc, char** argv){
         fprintf(stderr, "send_pkt_out failed (rc=%d)\n", rc);
         return 1;
     }
-    // Give the receiver thread a moment to dispatch + print.
     usleep(100 * 1000);
     return 0;
 }
 
+// ch5: `run node <node> resolve-arp <ip>` - trigger an ARP request
+// for `<ip>` from `<node>`. The detached receiver thread does the
+// rest (reply, table update) before we return to the caller.
+static int run_node_resolve_arp_handler(int argc, char** argv){
+    if(argc != 2){
+        fprintf(stderr, "run node resolve-arp: expected <node> <ip>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    send_arp_broadcast_request(node, 0, argv[1]);
+    // Give the (detached) receiver thread time to process request,
+    // send reply, process reply, update ARP table.
+    usleep(200 * 1000);
+    return 0;
+}
+
+// ---- command tree --------------------------------------------------------
 // Children arrays are NULL-terminated. Built bottom-up so each
 // parent's child pointer table is in scope.
 
+// show topology
 static CliCmd cmd_show_topology = {
     .name     = "topology",
     .handler  = show_topology_handler,
     .help     = "dump the loaded topology with L2/L3 properties",
 };
 
+// show node <name> arp
+static CliCmd cmd_show_node_arp = {
+    .name     = "arp",
+    .handler  = show_node_arp_handler,
+    .help     = "dump the node's ARP table",
+};
+static CliCmd* show_node_name_children[] = { &cmd_show_node_arp, 0 };
+
+static CliCmd cmd_show_node_name = {
+    .name     = "<node-name>",
+    .capture  = true,
+    .help     = "node name (e.g. R0_re)",
+    .children = show_node_name_children,
+};
+static CliCmd* show_node_children[] = { &cmd_show_node_name, 0 };
+
+static CliCmd cmd_show_node = {
+    .name     = "node",
+    .help     = "show node <name> <subcommand>",
+    .children = show_node_children,
+};
+
 static CliCmd* show_children[] = {
     &cmd_show_topology,
+    &cmd_show_node,
     0,
 };
 
@@ -87,7 +146,7 @@ static CliCmd cmd_show = {
     .children = show_children,
 };
 
-// run send <node> <if> <payload>: three trailing tokens captured.
+// run send <node> <if> <payload>
 static CliCmd cmd_run_send_payload = {
     .name     = "<payload>",
     .capture  = true,
@@ -118,8 +177,39 @@ static CliCmd cmd_run_send = {
     .children = run_send_node_children,
 };
 
+// run node <name> resolve-arp <ip>
+static CliCmd cmd_run_node_resolve_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .handler  = run_node_resolve_arp_handler,
+    .help     = "IP address to resolve via ARP",
+};
+static CliCmd* run_node_resolve_ip_children[] = { &cmd_run_node_resolve_ip, 0 };
+
+static CliCmd cmd_run_node_resolve = {
+    .name     = "resolve-arp",
+    .help     = "send an ARP broadcast for <ip>",
+    .children = run_node_resolve_ip_children,
+};
+static CliCmd* run_node_name_children[] = { &cmd_run_node_resolve, 0 };
+
+static CliCmd cmd_run_node_name = {
+    .name     = "<node-name>",
+    .capture  = true,
+    .help     = "node name (e.g. R0_re)",
+    .children = run_node_name_children,
+};
+static CliCmd* run_node_children[] = { &cmd_run_node_name, 0 };
+
+static CliCmd cmd_run_node = {
+    .name     = "node",
+    .help     = "run node <name> <subcommand>",
+    .children = run_node_children,
+};
+
 static CliCmd* run_children[] = {
     &cmd_run_send,
+    &cmd_run_node,
     0,
 };
 
@@ -144,10 +234,6 @@ static CliCmd cmd_root = {
 void nwcli_install(Graph* topo){
     g_topo = topo;
     cli_set_root(&cmd_root);
-    // ch4: bring up the per-Node receiver thread so commands like
-    // `run send ...` have a working forwarding path.
     network_start_pkt_receiver_thread(topo);
-    // Give the thread a beat to call FD_SET on every socket before
-    // the first send.
     usleep(50 * 1000);
 }

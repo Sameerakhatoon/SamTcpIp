@@ -4,7 +4,8 @@
 // Per-Node and per-Interface networking properties. ch1 left the
 // graph layer domain-blind; ch2 bolts MAC / IP / loopback / device
 // type onto Node and Interface via two payload structs so the graph
-// stays generic.
+// stays generic. ch5 grows NodeNwProp with an ARP table pointer
+// (declared opaque here so layer2.h can stay out of graph.h).
 //
 // Include order: net.h is included BY graph.h, so net.h defines the
 // payload structs and only forward-declares Node / Interface (used
@@ -17,6 +18,10 @@
 typedef struct Node      Node;
 typedef struct Interface Interface;
 typedef struct Graph     Graph;
+
+// ch5: opaque pointer to the per-Node ARP table; full type in
+// Layer2/layer2.h. Net layer never dereferences it.
+typedef struct ArpTable  ArpTable;
 
 // Device-type bit flags. A Node can be a router, an L2 switch, a
 // hub, or any combination (router-bridge etc).
@@ -36,17 +41,24 @@ typedef struct MacAddr     MacAddr;
 typedef struct NodeNwProp  NodeNwProp;
 typedef struct IntfNwProps IntfNwProps;
 
+// ch5: packed so MAC / IP fields are byte-tight when these end up
+// in real packet headers (ethernet_hdr_t / arp_hdr_t).
+#pragma pack(push, 1)
+
 struct IpAddr {
-    char ip_addr[16];        // dotted-quad "aaa.bbb.ccc.ddd"
+    unsigned char ip_addr[16];   // dotted-quad "aaa.bbb.ccc.ddd"
 };
 
 struct MacAddr {
-    char mac[48];            // book uses a 48-byte buffer (not 6); preserved
+    unsigned char mac[6];        // ch5: real 48-bit MAC
 };
+
+#pragma pack(pop)
 
 struct NodeNwProp {
     unsigned int flags;              // L3_ROUTER | L2_SWITCH | HUB
-    bool         is_lb_addr_config;  // loopback configured?
+    ArpTable*    arp_table;          // ch5: per-Node ARP cache
+    bool         is_lb_addr_config;
     IpAddr       lb_addr;
 };
 
@@ -59,24 +71,15 @@ struct IntfNwProps {
     char    mask;
 };
 
-static inline void init_node_nw_prop(NodeNwProp* p){
-    p->flags             = 0;
-    p->is_lb_addr_config = false;
-    memset(p->lb_addr.ip_addr, 0, sizeof(p->lb_addr.ip_addr));
-}
-
-static inline void init_intf_nw_prop(IntfNwProps* p){
-    memset(p->mac_add.mac, 0, sizeof(p->mac_add.mac));
-    p->is_ipadd_config = false;
-    memset(p->ip_add.ip_addr, 0, sizeof(p->ip_add.ip_addr));
-    p->mask = 0;
-}
+void init_node_nw_prop(NodeNwProp* p);
+void init_intf_nw_prop(IntfNwProps* p);
 
 // Lookup shortcuts. These touch full Node / Interface layouts, so
 // callers must have graph.h included before using them.
-#define IF_MAC(intf_ptr)        ((intf_ptr)->intf_nw_props.mac_add.mac)
-#define IF_IP(intf_ptr)         ((intf_ptr)->intf_nw_props.ip_add.ip_addr)
-#define NODE_LO_ADDR(node_ptr)  ((node_ptr)->node_nw_prop.lb_addr.ip_addr)
+#define IF_MAC(intf_ptr)        ((char*)((intf_ptr)->intf_nw_props.mac_add.mac))
+#define IF_IP(intf_ptr)         ((char*)((intf_ptr)->intf_nw_props.ip_add.ip_addr))
+#define NODE_LO_ADDR(node_ptr)  ((char*)((node_ptr)->node_nw_prop.lb_addr.ip_addr))
+#define NODE_ARP_TABLE(node_ptr) ((node_ptr)->node_nw_prop.arp_table)
 
 void interface_assign_mac_address(Interface* intf);
 
@@ -86,8 +89,12 @@ bool node_set_loopback_address(Node* node, char* ip_addr);
 bool node_set_intf_ip_address(Node* node, char* local_if, char* ip_addr, char mask);
 bool node_unset_intf_ip_address(Node* node, char* local_if);
 
-// Network-aware dumps. dump_graph from ch1 still works; these ones
-// add device + IP + MAC lines.
+// ch5: walk the Node's interfaces and return the first whose
+// configured subnet contains `ip_addr`. Used by ARP / routing.
+Interface* node_get_matching_subnet_interface(Node* node, char* ip_addr);
+
+// Network-aware dumps. dump_graph from ch1 still works; these add
+// device + IP + MAC lines.
 void dump_nw_graph(Graph* graph);
 void dump_node_nw_props(Node* node);
 void dump_intf_props(Interface* intf);

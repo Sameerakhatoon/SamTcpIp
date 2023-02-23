@@ -6,6 +6,7 @@ OBJECTS  = build/graph.o \
            build/cli.o \
            build/nwcli.o \
            build/comm.o \
+           build/utils.o \
            build/Layer2/layer2.o \
            build/Layer3/layer3.o \
            build/topologies.o \
@@ -24,7 +25,7 @@ build/graph.o: graph.c graph.h net.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c graph.c -o build/graph.o
 
-build/net.o: net.c net.h graph.h
+build/net.o: net.c net.h graph.h utils.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c net.c -o build/net.o
 
@@ -32,7 +33,7 @@ build/cli.o: cli.c cli.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c cli.c -o build/cli.o
 
-build/nwcli.o: nwcli.c nwcli.h cli.h graph.h net.h comm.h
+build/nwcli.o: nwcli.c nwcli.h cli.h graph.h net.h comm.h Layer2/layer2.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c nwcli.c -o build/nwcli.o
 
@@ -40,7 +41,11 @@ build/comm.o: comm.c comm.h graph.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c comm.c -o build/comm.o
 
-build/Layer2/layer2.o: Layer2/layer2.c graph.h
+build/utils.o: utils.c utils.h net.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -c utils.c -o build/utils.o
+
+build/Layer2/layer2.o: Layer2/layer2.c Layer2/layer2.h graph.h net.h utils.h comm.h
 	@mkdir -p build/Layer2
 	$(CC) $(CFLAGS) -c Layer2/layer2.c -o build/Layer2/layer2.o
 

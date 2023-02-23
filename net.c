@@ -1,46 +1,82 @@
+#include <arpa/inet.h>
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "graph.h"
 #include "net.h"
+#include "utils.h"
 
 // Forward declarations.
-void interface_assign_mac_address(Interface* intf);
-bool node_set_device_type(Node* node, unsigned int flag);
-bool node_set_loopback_address(Node* node, char* ip_addr);
-bool node_set_intf_ip_address(Node* node, char* local_if, char* ip_addr, char mask);
-bool node_unset_intf_ip_address(Node* node, char* local_if);
-void dump_nw_graph(Graph* graph);
-void dump_node_nw_props(Node* node);
-void dump_intf_props(Interface* intf);
+static unsigned int hash_code(void* ptr, unsigned int size);
+void                init_node_nw_prop(NodeNwProp* p);
+void                init_intf_nw_prop(IntfNwProps* p);
+void                interface_assign_mac_address(Interface* intf);
+bool                node_set_device_type(Node* node, unsigned int flag);
+bool                node_set_loopback_address(Node* node, char* ip_addr);
+bool                node_set_intf_ip_address(Node* node, char* local_if, char* ip_addr, char mask);
+bool                node_unset_intf_ip_address(Node* node, char* local_if);
+Interface*          node_get_matching_subnet_interface(Node* node, char* ip_addr);
+void                dump_nw_graph(Graph* graph);
+void                dump_node_nw_props(Node* node);
+void                dump_intf_props(Interface* intf);
 
-// Deterministic MAC heuristic: concatenate node name + interface
-// name into the MAC byte buffer. Not a real OUI - just unique per
-// (node, intf) pair so debugging is human-readable.
-void interface_assign_mac_address(Interface* intf){
-    memset(IF_MAC(intf), 0, sizeof(((MacAddr*)0)->mac));
-    strcpy(IF_MAC(intf), intf->att_node->node_name);
-    strcat(IF_MAC(intf), intf->if_name);
+// ch5: opaque-friendly init. The full ArpTable type lives in
+// Layer2/layer2.h; this trampoline keeps net.c free of layer2
+// includes.
+extern void init_arp_table(ArpTable** arp_table);
+
+// Cheap multiplicative hash used to derive a 4-byte MAC seed from
+// any pointer's content. Not a real OUI - just stable-within-a-run
+// + unique per interface so debug output is recognisable.
+static unsigned int hash_code(void* ptr, unsigned int size){
+    unsigned int value = 0;
+    char*        str   = (char*)ptr;
+    for(unsigned int i = 0; i < size; i++){
+        value += (unsigned char)*str;
+        value *= 97;
+        str++;
+    }
+    return value;
 }
 
-// SET_BIT / IS_BIT_SET take bit positions, but our L3_ROUTER /
-// L2_SWITCH / HUB defines are already shifted (1 << N) values, so
-// OR them in directly rather than translating to positions.
+void init_node_nw_prop(NodeNwProp* p){
+    p->flags             = 0;
+    p->is_lb_addr_config = false;
+    memset(p->lb_addr.ip_addr, 0, sizeof(p->lb_addr.ip_addr));
+    // ch5: every Node gets an empty ARP table at creation time.
+    init_arp_table(&p->arp_table);
+}
+
+void init_intf_nw_prop(IntfNwProps* p){
+    memset(p->mac_add.mac, 0, sizeof(p->mac_add.mac));
+    p->is_ipadd_config = false;
+    memset(p->ip_add.ip_addr, 0, sizeof(p->ip_add.ip_addr));
+    p->mask = 0;
+}
+
+// ch5: with MacAddr shrunk to 6 bytes, the ch2 "concat name into
+// MAC" heuristic no longer fits. Hash the Interface*'s content into
+// a 4-byte seed and pad to 6.
+void interface_assign_mac_address(Interface* intf){
+    unsigned int seed = hash_code(intf, sizeof(*intf));
+    memset(IF_MAC(intf), 0, 6);
+    memcpy(IF_MAC(intf), &seed, sizeof(unsigned int));
+}
+
 bool node_set_device_type(Node* node, unsigned int flag){
     node->node_nw_prop.flags |= flag;
     return true;
 }
 
-// Loopback only makes sense on an L3 device. The book asserts hard
-// on misconfiguration; we keep that behaviour.
 bool node_set_loopback_address(Node* node, char* ip_addr){
     bool ok = false;
     assert(ip_addr);
     if(node->node_nw_prop.flags & HUB){
-        assert(0);  // HUBs have no IPs
+        assert(0);
     }
     if(!(node->node_nw_prop.flags & L3_ROUTER)){
-        assert(0);  // enable L3 routing on the node first
+        assert(0);
     }
     node->node_nw_prop.is_lb_addr_config = true;
     strncpy(NODE_LO_ADDR(node), ip_addr, 15);
@@ -75,10 +111,33 @@ bool node_unset_intf_ip_address(Node* node, char* local_if){
     return true;
 }
 
-// Network-aware Node dump. Adds the flags + loopback lines on top
-// of the ch1 graph dump.
+// ch5: walk the Node's interfaces; apply each interface's mask to
+// both its own IP and the lookup IP; the first matching pair is the
+// owning subnet.
+Interface* node_get_matching_subnet_interface(Node* node, char* ip_addr){
+    char intf_subnet[16];
+    char lookup_subnet[16];
+    for(int i = 0; i < MAX_INTF_PER_NODE; i++){
+        Interface* intf = node->intf[i];
+        if(!intf){
+            return 0;
+        }
+        if(!intf->intf_nw_props.is_ipadd_config){
+            continue;
+        }
+        memset(intf_subnet,   0, sizeof(intf_subnet));
+        memset(lookup_subnet, 0, sizeof(lookup_subnet));
+        apply_mask(IF_IP(intf), intf->intf_nw_props.mask, intf_subnet);
+        apply_mask(ip_addr,     intf->intf_nw_props.mask, lookup_subnet);
+        if(strncmp(intf_subnet, lookup_subnet, 16) == 0){
+            return intf;
+        }
+    }
+    return 0;
+}
+
 void dump_node_nw_props(Node* node){
-    printf("\nNode Name = %s\n", node->node_name);
+    printf("\nNode Name = %s, udp_port_no = %u\n", node->node_name, node->udp_port_number);
     printf("\t node flags : %u\n", node->node_nw_prop.flags);
     if(node->node_nw_prop.is_lb_addr_config){
         printf("\t  lo addr : %s/32\n", NODE_LO_ADDR(node));
@@ -93,9 +152,9 @@ void dump_intf_props(Interface* intf){
         printf("\t IP Addr = %s/%u", "Nil", 0);
     }
     printf("\t MAC : %u:%u:%u:%u:%u:%u\n",
-           (unsigned char)IF_MAC(intf)[0], (unsigned char)IF_MAC(intf)[1],
-           (unsigned char)IF_MAC(intf)[2], (unsigned char)IF_MAC(intf)[3],
-           (unsigned char)IF_MAC(intf)[4], (unsigned char)IF_MAC(intf)[5]);
+           intf->intf_nw_props.mac_add.mac[0], intf->intf_nw_props.mac_add.mac[1],
+           intf->intf_nw_props.mac_add.mac[2], intf->intf_nw_props.mac_add.mac[3],
+           intf->intf_nw_props.mac_add.mac[4], intf->intf_nw_props.mac_add.mac[5]);
 }
 
 void dump_nw_graph(Graph* graph){

@@ -17,7 +17,8 @@ assert_contains "$out" "IP Addr = 20.1.1.2/24" "R1 eth0/1 IP"
 assert_contains "$out" "IP Addr = 30.1.1.1/24" "R1 eth0/2 IP"
 assert_contains "$out" "IP Addr = 30.1.1.2/24" "R2 eth0/3 IP"
 assert_contains "$out" "IP Addr = 40.1.1.2/24" "R2 eth0/5 IP"
-# MAC heuristic concatenates node_name + if_name, so first byte of
-# the MAC line for any R0_re intf is the ASCII code of 'R' (82).
-assert_contains "$out" "MAC : 82:"             "MAC byte 0 is 'R' (82)"
+# ch5 swapped the MAC heuristic from "concat node+if name" (48-byte
+# MAC) to "hash-of-interface" (real 6-byte MAC, 4 bytes of hash +
+# 2 zero pad). All MAC lines therefore end in `:0:0`.
+assert_contains "$out" ":0:0"                   "MAC trailing zero-pad"
 pass
