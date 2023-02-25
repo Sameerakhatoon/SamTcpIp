@@ -7,17 +7,32 @@
 
 // Forward declarations.
 extern Graph* build_first_topo(void);
+extern Graph* build_simple_l2_switch_topo(void);
 
-// testapp now boots the topology, installs the CLI tree, and either
-//   - runs `--cmd "<line>"` for a single non-interactive shot, or
-//   - reads stdin line-by-line for an interactive REPL.
-// The single-shot mode is what the bash tests drive.
+// testapp boots the topology, installs the CLI tree, and either
+// runs `--cmd "<line>"` (single-shot for tests) or drops into a
+// stdin REPL. ch6 added `--topo l2switch` to pick the simple-l2
+// topology instead of the default 3-node ring.
 int main(int argc, char** argv){
-    Graph* topo = build_first_topo();
+    Graph* topo        = 0;
+    const char* topo_name = "first";
+    int    i           = 1;
+
+    // First parse optional `--topo <name>` from the front of argv.
+    if(argc >= 3 && strcmp(argv[1], "--topo") == 0){
+        topo_name = argv[2];
+        i = 3;
+    }
+    if(strcmp(topo_name, "l2switch") == 0){
+        topo = build_simple_l2_switch_topo();
+    } else {
+        topo = build_first_topo();
+    }
+
     nwcli_install(topo);
 
-    if(argc >= 3 && strcmp(argv[1], "--cmd") == 0){
-        return cli_run_line(argv[2]);
+    if(i + 1 < argc && strcmp(argv[i], "--cmd") == 0){
+        return cli_run_line(argv[i + 1]);
     }
     cli_repl(stdin);
     return 0;

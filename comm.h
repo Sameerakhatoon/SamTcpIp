@@ -25,7 +25,10 @@ void network_start_pkt_receiver_thread(Graph* topo);
 
 // Public APIs used by the rest of the stack.
 int send_pkt_out(char* pkt, size_t pkt_size, Interface* oif);
-int send_pkt_flood(Node* node, char* pkt, size_t pkt_size);
+// ch6: flood the packet out of every interface of `node` EXCEPT
+// `exempted_intf` (typically the interface the frame arrived on,
+// so we don't echo it back). Pass NULL to skip nothing.
+int send_pkt_flood(Node* node, Interface* exempted_intf, char* pkt, size_t pkt_size);
 
 // Entry point hooked by the receiver thread once it has resolved
 // the recv interface. Layer 2 takes it from here.

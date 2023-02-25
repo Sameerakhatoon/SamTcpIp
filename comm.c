@@ -19,7 +19,7 @@ static void*        _network_start_pkt_receiver_thread(void* arg);
 void                init_udp_socket(Node* node);
 void                network_start_pkt_receiver_thread(Graph* topo);
 int                 send_pkt_out(char* pkt, size_t pkt_size, Interface* oif);
-int                 send_pkt_flood(Node* node, char* pkt, size_t pkt_size);
+int                 send_pkt_flood(Node* node, Interface* exempted_intf, char* pkt, size_t pkt_size);
 int                 pkt_receive(Node* node, Interface* iif, char* pkt, size_t pkt_size);
 
 // Hand-off to the Layer 2 frame receiver - defined in layer2.c.
@@ -188,12 +188,15 @@ int send_pkt_out(char* pkt, size_t pkt_size, Interface* oif){
     return rc;
 }
 
-int send_pkt_flood(Node* node, char* pkt, size_t pkt_size){
+int send_pkt_flood(Node* node, Interface* exempted_intf, char* pkt, size_t pkt_size){
     int rc = 0;
     for(int i = 0; i < MAX_INTF_PER_NODE; i++){
         Interface* intf = node->intf[i];
         if(!intf){
             break;
+        }
+        if(intf == exempted_intf){
+            continue;
         }
         int one = send_pkt_out(pkt, pkt_size, intf);
         if(one < 0){

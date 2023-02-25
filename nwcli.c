@@ -12,8 +12,10 @@
 static Node* find_node_by_name(const char* name);
 static int   show_topology_handler(int argc, char** argv);
 static int   show_node_arp_handler(int argc, char** argv);
+static int   show_node_mac_handler(int argc, char** argv);
 static int   run_send_handler(int argc, char** argv);
 static int   run_node_resolve_arp_handler(int argc, char** argv);
+static int   config_l2mode_handler(int argc, char** argv);
 void         nwcli_install(Graph* topo);
 
 // The CLI tree only ever needs a single Graph (the topology built at
@@ -53,6 +55,48 @@ static int show_node_arp_handler(int argc, char** argv){
         return 1;
     }
     dump_arp_table(NODE_ARP_TABLE(node));
+    return 0;
+}
+
+// ch6: `show node <node-name> mac` - dump the per-Node mac-learning
+// table (only meaningful on a Node operating as an L2 switch).
+static int show_node_mac_handler(int argc, char** argv){
+    if(argc != 1){
+        fprintf(stderr, "show node mac: expected <node>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    dump_mac_table(NODE_MAC_TABLE(node));
+    return 0;
+}
+
+// ch6: `config node <node> interface <if> l2mode <access|trunk>`.
+// Flips the interface to L2 mode and stashes its IP-config flag so
+// it can be brought back to L3 later.
+static int config_l2mode_handler(int argc, char** argv){
+    if(argc != 3){
+        fprintf(stderr, "config: expected <node> <if> <access|trunk>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    Interface* intf = get_node_if_by_name(node, argv[1]);
+    if(!intf){
+        fprintf(stderr, "no such interface `%s` on node `%s`\n", argv[1], argv[0]);
+        return 1;
+    }
+    if(strcmp(argv[2], "access") != 0 && strcmp(argv[2], "trunk") != 0){
+        fprintf(stderr, "l2mode must be access or trunk\n");
+        return 1;
+    }
+    interface_set_l2_mode(node, intf, argv[2]);
     return 0;
 }
 
@@ -118,7 +162,17 @@ static CliCmd cmd_show_node_arp = {
     .handler  = show_node_arp_handler,
     .help     = "dump the node's ARP table",
 };
-static CliCmd* show_node_name_children[] = { &cmd_show_node_arp, 0 };
+// show node <name> mac
+static CliCmd cmd_show_node_mac = {
+    .name     = "mac",
+    .handler  = show_node_mac_handler,
+    .help     = "dump the node's mac-learning table",
+};
+static CliCmd* show_node_name_children[] = {
+    &cmd_show_node_arp,
+    &cmd_show_node_mac,
+    0,
+};
 
 static CliCmd cmd_show_node_name = {
     .name     = "<node-name>",
@@ -219,9 +273,66 @@ static CliCmd cmd_run = {
     .children = run_children,
 };
 
+// config node <node> interface <if> l2mode <access|trunk>
+static CliCmd cmd_config_l2mode_val = {
+    .name     = "<access|trunk>",
+    .capture  = true,
+    .handler  = config_l2mode_handler,
+    .help     = "access or trunk",
+};
+static CliCmd* config_l2mode_val_children[] = { &cmd_config_l2mode_val, 0 };
+
+static CliCmd cmd_config_l2mode = {
+    .name     = "l2mode",
+    .help     = "set L2 mode on the interface",
+    .children = config_l2mode_val_children,
+};
+static CliCmd* config_if_name_children[] = { &cmd_config_l2mode, 0 };
+
+static CliCmd cmd_config_if_name = {
+    .name     = "<if-name>",
+    .capture  = true,
+    .help     = "interface name",
+    .children = config_if_name_children,
+};
+static CliCmd* config_interface_children[] = { &cmd_config_if_name, 0 };
+
+static CliCmd cmd_config_interface = {
+    .name     = "interface",
+    .help     = "interface <name> <subcommand>",
+    .children = config_interface_children,
+};
+static CliCmd* config_node_name_children[] = { &cmd_config_interface, 0 };
+
+static CliCmd cmd_config_node_name = {
+    .name     = "<node-name>",
+    .capture  = true,
+    .help     = "node name",
+    .children = config_node_name_children,
+};
+static CliCmd* config_node_children[] = { &cmd_config_node_name, 0 };
+
+static CliCmd cmd_config_node = {
+    .name     = "node",
+    .help     = "config node <name> <subcommand>",
+    .children = config_node_children,
+};
+
+static CliCmd* config_children[] = {
+    &cmd_config_node,
+    0,
+};
+
+static CliCmd cmd_config = {
+    .name     = "config",
+    .help     = "config: change device state",
+    .children = config_children,
+};
+
 static CliCmd* root_children[] = {
     &cmd_show,
     &cmd_run,
+    &cmd_config,
     0,
 };
 

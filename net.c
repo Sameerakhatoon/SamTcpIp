@@ -21,10 +21,11 @@ void                dump_nw_graph(Graph* graph);
 void                dump_node_nw_props(Node* node);
 void                dump_intf_props(Interface* intf);
 
-// ch5: opaque-friendly init. The full ArpTable type lives in
-// Layer2/layer2.h; this trampoline keeps net.c free of layer2
-// includes.
+// ch5/ch6: opaque-friendly init. The full ArpTable / MacTable
+// types live in Layer2/layer2.h; these trampolines keep net.c
+// free of layer2 includes.
 extern void init_arp_table(ArpTable** arp_table);
+extern void init_mac_table(MacTable** mac_table);
 
 // Cheap multiplicative hash used to derive a 4-byte MAC seed from
 // any pointer's content. Not a real OUI - just stable-within-a-run
@@ -46,10 +47,17 @@ void init_node_nw_prop(NodeNwProp* p){
     memset(p->lb_addr.ip_addr, 0, sizeof(p->lb_addr.ip_addr));
     // ch5: every Node gets an empty ARP table at creation time.
     init_arp_table(&p->arp_table);
+    // ch6: and an empty mac-learning table.
+    init_mac_table(&p->mac_table);
 }
 
 void init_intf_nw_prop(IntfNwProps* p){
+    // L2.
     memset(p->mac_add.mac, 0, sizeof(p->mac_add.mac));
+    p->intf_l2_mode = L2_MODE_UNKNOWN;
+    memset(p->vlans, 0, sizeof(p->vlans));
+    p->is_ipadd_config_backup = false;
+    // L3.
     p->is_ipadd_config = false;
     memset(p->ip_add.ip_addr, 0, sizeof(p->ip_add.ip_addr));
     p->mask = 0;

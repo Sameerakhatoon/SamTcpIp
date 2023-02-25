@@ -8,6 +8,7 @@ OBJECTS  = build/graph.o \
            build/comm.o \
            build/utils.o \
            build/Layer2/layer2.o \
+           build/Layer2/l2switch.o \
            build/Layer3/layer3.o \
            build/topologies.o \
            build/gluethread/glthread.o
@@ -48,6 +49,10 @@ build/utils.o: utils.c utils.h net.h
 build/Layer2/layer2.o: Layer2/layer2.c Layer2/layer2.h graph.h net.h utils.h comm.h
 	@mkdir -p build/Layer2
 	$(CC) $(CFLAGS) -c Layer2/layer2.c -o build/Layer2/layer2.o
+
+build/Layer2/l2switch.o: Layer2/l2switch.c Layer2/layer2.h graph.h net.h utils.h comm.h
+	@mkdir -p build/Layer2
+	$(CC) $(CFLAGS) -c Layer2/l2switch.c -o build/Layer2/l2switch.o
 
 build/Layer3/layer3.o: Layer3/layer3.c graph.h
 	@mkdir -p build/Layer3

@@ -23,6 +23,12 @@ void        delete_arp_table_entry(ArpTable* arp_table, char* ip_addr);
 bool        arp_table_entry_add(ArpTable* arp_table, ArpEntry* arp_entry);
 void        arp_table_update_from_arp_reply(ArpTable* arp_table, ArpHdr* arp_hdr, Interface* iif);
 void        dump_arp_table(ArpTable* arp_table);
+void        interface_set_l2_mode(Node* node, Interface* intf, char* l2_mode_option);
+void        node_set_intf_l2_mode(Node* node, char* intf_name, IntfL2Mode mode);
+void        node_set_intf_vlan_membsership(Node* node, char* intf_name, unsigned int vlan_id);
+
+// ch6: hand-off when the recv interface is in ACCESS / TRUNK mode.
+extern void l2_switch_recv_frame(Interface* iif, char* pkt, size_t pkt_size);
 
 // Stub - real layer3 lands in ch9.
 extern void layer3_pkt_recv(Node* node, Interface* iif, char* pkt, size_t pkt_size);
@@ -72,11 +78,15 @@ void delete_arp_table_entry(ArpTable* arp_table, char* ip_addr){
 // (caller should free the duplicate).
 bool arp_table_entry_add(ArpTable* arp_table, ArpEntry* arp_entry){
     ArpEntry* old = arp_table_lookup(arp_table, (char*)arp_entry->ip_addr.ip_addr);
-    if(old && memcmp(old, arp_entry, sizeof(ArpEntry)) == 0){
+    // ch6: compare via IS_ARP_ENTRIES_EQUAL macro rather than
+    // memcmp'ing whole structs - the latter would include the
+    // embedded glthread links and produce false negatives.
+    if(old && IS_ARP_ENTRIES_EQUAL(old, arp_entry)){
         return false;
     }
     if(old){
-        delete_arp_table_entry(arp_table, (char*)arp_entry->ip_addr.ip_addr);
+        // Delete by the OLD entry's key (same as new but explicit).
+        delete_arp_table_entry(arp_table, (char*)old->ip_addr.ip_addr);
     }
     init_glthread(&arp_entry->arp_glue);
     glthread_add_next(&arp_table->arp_entries, &arp_entry->arp_glue);
@@ -217,23 +227,95 @@ void layer2_frame_recv(Node* node, Interface* iif, char* pkt, size_t pkt_size){
     }
     printf("L2 Frame Accepted\n");
 
-    switch(eth->type){
-        case ARP_MSG: {
-            ArpHdr* arp = (ArpHdr*)eth->payload;
-            switch(arp->op_code){
-                case ARP_BROAD_REQ:
-                    process_arp_broadcast_request(node, iif, eth);
-                    break;
-                case ARP_REPLY:
-                    process_arp_reply_msg(node, iif, eth);
-                    break;
-                default:
-                    break;
+    // ch6: split by receiving interface's mode. L3 -> the existing
+    // ARP / promote-to-L3 switch. L2 (ACCESS or TRUNK) -> hand off
+    // to the L2 switch's learn + forward path.
+    if(IS_INTF_L3_MODE(iif)){
+        switch(eth->type){
+            case ARP_MSG: {
+                ArpHdr* arp = (ArpHdr*)eth->payload;
+                switch(arp->op_code){
+                    case ARP_BROAD_REQ:
+                        process_arp_broadcast_request(node, iif, eth);
+                        break;
+                    case ARP_REPLY:
+                        process_arp_reply_msg(node, iif, eth);
+                        break;
+                    default:
+                        break;
+                }
+                break;
             }
-            break;
+            default:
+                promote_pkt_to_layer3(node, iif, pkt, pkt_size);
+                break;
         }
-        default:
-            promote_pkt_to_layer3(node, iif, pkt, pkt_size);
-            break;
+        return;
+    }
+    if(IF_L2_MODE(iif) == ACCESS || IF_L2_MODE(iif) == TRUNK){
+        l2_switch_recv_frame(iif, pkt, pkt_size);
+    }
+    // Else: drop.
+}
+
+// ---- ch6: L2 interface mode setters --------------------------------------
+
+void interface_set_l2_mode(Node* node, Interface* intf, char* l2_mode_option){
+    (void)node;
+    IntfL2Mode mode;
+    if(strncmp(l2_mode_option, "access", strlen("access")) == 0){
+        mode = ACCESS;
+    } else if(strncmp(l2_mode_option, "trunk", strlen("trunk")) == 0){
+        mode = TRUNK;
+    } else {
+        assert(0);
+    }
+
+    // Case 1: was L3 -> stash the IP-config flag and flip to L2.
+    if(IS_INTF_L3_MODE(intf)){
+        intf->intf_nw_props.is_ipadd_config_backup = true;
+        intf->intf_nw_props.is_ipadd_config        = false;
+        IF_L2_MODE(intf) = mode;
+        return;
+    }
+    // Case 2: not configured in any mode yet -> just set.
+    if(IF_L2_MODE(intf) == L2_MODE_UNKNOWN){
+        IF_L2_MODE(intf) = mode;
+        return;
+    }
+    // Case 3: same mode -> no-op.
+    if(IF_L2_MODE(intf) == mode){
+        return;
+    }
+    // Case 4: ACCESS -> TRUNK = overwrite.
+    if(IF_L2_MODE(intf) == ACCESS && mode == TRUNK){
+        IF_L2_MODE(intf) = mode;
+        return;
+    }
+    // Case 5: TRUNK -> ACCESS = overwrite AND zero all VLAN slots.
+    // User must re-enable VLAN after demoting.
+    if(IF_L2_MODE(intf) == TRUNK && mode == ACCESS){
+        IF_L2_MODE(intf) = mode;
+        for(unsigned int i = 0; i < MAX_VLAN_MEMBERSHIP; i++){
+            intf->intf_nw_props.vlans[i] = 0;
+        }
+    }
+}
+
+// Convenience wrappers for topology builders.
+void node_set_intf_l2_mode(Node* node, char* intf_name, IntfL2Mode mode){
+    Interface* intf = get_node_if_by_name(node, intf_name);
+    assert(intf);
+    interface_set_l2_mode(node, intf, (char*)intf_l2_mode_str(mode));
+}
+
+// Typo "vlan_membsership" preserved verbatim from the reference.
+void node_set_intf_vlan_membsership(Node* node, char* intf_name, unsigned int vlan_id){
+    Interface* intf = get_node_if_by_name(node, intf_name);
+    assert(intf);
+    // ch7 implements the real per-mode VLAN slot logic; for ch6 we
+    // just stamp the first slot so a TRUNK port has *something*.
+    if(IF_L2_MODE(intf) == ACCESS || IF_L2_MODE(intf) == TRUNK){
+        intf->intf_nw_props.vlans[0] = vlan_id;
     }
 }
