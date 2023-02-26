@@ -10,7 +10,9 @@
 
 // Forward declarations.
 static void           l2_switch_perform_mac_learning(Node* node, char* src_mac, char* if_name);
-static void           l2_switch_forward_frame(Node* node, Interface* recv_intf, char* pkt, size_t pkt_size);
+static void           l2_switch_forward_frame(Node* node, Interface* recv_intf, EthernetHdr* eth, size_t pkt_size);
+static bool           l2_switch_send_pkt_out(char* pkt, size_t pkt_size, Interface* oif);
+static void           l2_switch_flood_pkt_out(Node* node, Interface* exempted_intf, char* pkt, size_t pkt_size);
 void                  init_mac_table(MacTable** mac_table);
 MacTableEntry*        mac_table_lookup(MacTable* mac_table, char* mac);
 void                  clear_mac_table(MacTable* mac_table);
@@ -97,31 +99,102 @@ static void l2_switch_perform_mac_learning(Node* node, char* src_mac, char* if_n
     }
 }
 
-// Forwarding: broadcast dst -> flood (except recv intf). Known
-// unicast -> send out the learned OIF. Unknown unicast -> flood.
-static void l2_switch_forward_frame(Node* node, Interface* recv_intf,
-                                    char* pkt, size_t pkt_size){
-    EthernetHdr* eth = (EthernetHdr*)pkt;
+// ch7: per-port egress decision. Returns true if the frame was sent
+// out, false if dropped. The egress rules:
+//   - ACCESS port, no VLAN, untagged frame -> forward untouched.
+//   - ACCESS port, has VLAN, untagged frame -> drop (case 2).
+//   - ACCESS port, has VLAN X, tagged X     -> UNTAG and forward.
+//     (Deviation from reference: ref forwards tagged. Real switches
+//      untag on ACCESS egress so the host receives a plain frame;
+//      our L3 qualifier rejects tagged frames so untag is required
+//      for end-to-end ARP to work.)
+//   - ACCESS port, has VLAN X, tagged Y!=X  -> drop.
+//   - ACCESS port, no VLAN, tagged frame    -> drop.
+//   - TRUNK port, tagged frame in member VLAN -> forward as-is.
+//   - TRUNK port, tagged but not a member, or untagged -> drop.
+static bool l2_switch_send_pkt_out(char* pkt, size_t pkt_size, Interface* oif){
+    assert(!IS_INTF_L3_MODE(oif));
+    if(IF_L2_MODE(oif) == L2_MODE_UNKNOWN){
+        return false;
+    }
 
+    EthernetHdr*  eth = (EthernetHdr*)pkt;
+    Vlan8021qHdr* tag = is_pkt_vlan_tagged(eth);
+
+    if(IF_L2_MODE(oif) == ACCESS){
+        unsigned int port_vlan = get_access_intf_operating_vlan_id(oif);
+        if(port_vlan == 0 && !tag){
+            send_pkt_out(pkt, pkt_size, oif);
+            return true;
+        }
+        if(port_vlan == 0 && tag){
+            return false;
+        }
+        if(!tag){
+            return false;
+        }
+        if(GET_802_1Q_VLAN_ID(tag) != port_vlan){
+            return false;
+        }
+        // Untag in place, then send.
+        size_t new_size = untag_pkt_with_vlan_id(eth, pkt_size);
+        send_pkt_out((char*)eth, new_size, oif);
+        return true;
+    }
+
+    if(IF_L2_MODE(oif) == TRUNK){
+        if(!tag){
+            return false;
+        }
+        if(!is_trunk_interface_vlan_enabled(oif, GET_802_1Q_VLAN_ID(tag))){
+            return false;
+        }
+        send_pkt_out(pkt, pkt_size, oif);
+        return true;
+    }
+    return false;
+}
+
+// VLAN-aware flood: walk every interface (skipping the recv port)
+// and let l2_switch_send_pkt_out decide whether the frame fits this
+// port's VLAN config.
+static void l2_switch_flood_pkt_out(Node* node, Interface* exempted_intf,
+                                    char* pkt, size_t pkt_size){
+    for(int i = 0; i < MAX_INTF_PER_NODE; i++){
+        Interface* oif = node->intf[i];
+        if(!oif){
+            break;
+        }
+        if(oif == exempted_intf){
+            continue;
+        }
+        l2_switch_send_pkt_out(pkt, pkt_size, oif);
+    }
+}
+
+// Forwarding: broadcast dst -> VLAN-aware flood. Known unicast ->
+// VLAN-aware send out the learned OIF. Unknown unicast -> flood.
+static void l2_switch_forward_frame(Node* node, Interface* recv_intf,
+                                    EthernetHdr* eth, size_t pkt_size){
     if(IS_MAC_BROADCAST_ADDR((char*)eth->dst_mac.mac)){
-        send_pkt_flood(node, recv_intf, pkt, pkt_size);
+        l2_switch_flood_pkt_out(node, recv_intf, (char*)eth, pkt_size);
         return;
     }
     MacTableEntry* e = mac_table_lookup(NODE_MAC_TABLE(node), (char*)eth->dst_mac.mac);
     if(!e){
-        send_pkt_flood(node, recv_intf, pkt, pkt_size);
+        l2_switch_flood_pkt_out(node, recv_intf, (char*)eth, pkt_size);
         return;
     }
     Interface* oif = get_node_if_by_name(node, e->oif_name);
     if(!oif){
         return;
     }
-    send_pkt_out(pkt, pkt_size, oif);
+    l2_switch_send_pkt_out((char*)eth, pkt_size, oif);
 }
 
 void l2_switch_recv_frame(Interface* iif, char* pkt, size_t pkt_size){
     Node*        node = iif->att_node;
     EthernetHdr* eth  = (EthernetHdr*)pkt;
     l2_switch_perform_mac_learning(node, (char*)eth->src_mac.mac, iif->if_name);
-    l2_switch_forward_frame(node, iif, pkt, pkt_size);
+    l2_switch_forward_frame(node, iif, eth, pkt_size);
 }

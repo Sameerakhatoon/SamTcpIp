@@ -17,6 +17,8 @@ bool                node_set_loopback_address(Node* node, char* ip_addr);
 bool                node_set_intf_ip_address(Node* node, char* local_if, char* ip_addr, char mask);
 bool                node_unset_intf_ip_address(Node* node, char* local_if);
 Interface*          node_get_matching_subnet_interface(Node* node, char* ip_addr);
+unsigned int        get_access_intf_operating_vlan_id(Interface* intf);
+bool                is_trunk_interface_vlan_enabled(Interface* intf, unsigned int vlan_id);
 void                dump_nw_graph(Graph* graph);
 void                dump_node_nw_props(Node* node);
 void                dump_intf_props(Interface* intf);
@@ -179,4 +181,23 @@ void dump_nw_graph(Graph* graph){
             dump_intf_props(intf);
         }
     } ITERATE_GLTHREAD_END(&graph->node_list, curr);
+}
+
+// ch7: ACCESS-mode VLAN ID lookup. ACCESS interfaces carry exactly
+// one VLAN in vlans[0] (0 if none assigned). Asserts the mode.
+unsigned int get_access_intf_operating_vlan_id(Interface* intf){
+    assert(IF_L2_MODE(intf) == ACCESS);
+    return intf->intf_nw_props.vlans[0];
+}
+
+// ch7: TRUNK-mode VLAN membership check. Scan all slots; a 0 slot
+// is "empty" (so vlan_id == 0 never matches an in-use slot).
+bool is_trunk_interface_vlan_enabled(Interface* intf, unsigned int vlan_id){
+    assert(IF_L2_MODE(intf) == TRUNK);
+    for(unsigned int i = 0; i < MAX_VLAN_MEMBERSHIP; i++){
+        if(intf->intf_nw_props.vlans[i] == vlan_id){
+            return true;
+        }
+    }
+    return false;
 }

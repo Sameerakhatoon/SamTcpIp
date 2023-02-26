@@ -8,11 +8,12 @@
 // Forward declarations.
 extern Graph* build_first_topo(void);
 extern Graph* build_simple_l2_switch_topo(void);
+extern Graph* build_vlan_l2_switch_topo(void);
 
 // testapp boots the topology, installs the CLI tree, and either
 // runs `--cmd "<line>"` (single-shot for tests) or drops into a
-// stdin REPL. ch6 added `--topo l2switch` to pick the simple-l2
-// topology instead of the default 3-node ring.
+// stdin REPL. ch6/7 added `--topo l2switch` / `--topo vlan` to pick
+// alternative topologies instead of the default 3-node ring.
 int main(int argc, char** argv){
     Graph* topo        = 0;
     const char* topo_name = "first";
@@ -25,6 +26,8 @@ int main(int argc, char** argv){
     }
     if(strcmp(topo_name, "l2switch") == 0){
         topo = build_simple_l2_switch_topo();
+    } else if(strcmp(topo_name, "vlan") == 0){
+        topo = build_vlan_l2_switch_topo();
     } else {
         topo = build_first_topo();
     }

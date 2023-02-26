@@ -220,20 +220,23 @@ static void process_arp_broadcast_request(Node* node, Interface* iif, EthernetHd
 }
 
 void layer2_frame_recv(Node* node, Interface* iif, char* pkt, size_t pkt_size){
-    EthernetHdr* eth = (EthernetHdr*)pkt;
-    if(!l2_frame_recv_qualify_on_interface(iif, eth)){
+    EthernetHdr* eth         = (EthernetHdr*)pkt;
+    unsigned int vlan_to_tag = 0;
+    if(!l2_frame_recv_qualify_on_interface(iif, eth, &vlan_to_tag)){
         printf("L2 Frame Rejected\n");
         return;
     }
     printf("L2 Frame Accepted\n");
 
-    // ch6: split by receiving interface's mode. L3 -> the existing
-    // ARP / promote-to-L3 switch. L2 (ACCESS or TRUNK) -> hand off
-    // to the L2 switch's learn + forward path.
+    // ch6/7: split by receiving interface's mode. L3 -> the existing
+    // ARP / promote-to-L3 switch (uses GET_ETHERNET_HDR_PAYLOAD now
+    // so tagged + untagged frames both find the ARP correctly). L2
+    // -> tag if the qualifier flagged a case-6 untagged ingress,
+    // then hand off to the L2 switch.
     if(IS_INTF_L3_MODE(iif)){
         switch(eth->type){
             case ARP_MSG: {
-                ArpHdr* arp = (ArpHdr*)eth->payload;
+                ArpHdr* arp = (ArpHdr*)GET_ETHERNET_HDR_PAYLOAD(eth);
                 switch(arp->op_code){
                     case ARP_BROAD_REQ:
                         process_arp_broadcast_request(node, iif, eth);
@@ -253,7 +256,12 @@ void layer2_frame_recv(Node* node, Interface* iif, char* pkt, size_t pkt_size){
         return;
     }
     if(IF_L2_MODE(iif) == ACCESS || IF_L2_MODE(iif) == TRUNK){
-        l2_switch_recv_frame(iif, pkt, pkt_size);
+        size_t new_size = pkt_size;
+        if(vlan_to_tag){
+            new_size = tag_pkt_with_vlan_id(eth, pkt_size, vlan_to_tag);
+            assert(new_size != pkt_size);
+        }
+        l2_switch_recv_frame(iif, pkt, new_size);
     }
     // Else: drop.
 }
@@ -310,12 +318,92 @@ void node_set_intf_l2_mode(Node* node, char* intf_name, IntfL2Mode mode){
 }
 
 // Typo "vlan_membsership" preserved verbatim from the reference.
+//
+// ch7: real implementation.
+//   ACCESS: store in vlans[0]; one VLAN per port. Calling again
+//           overwrites.
+//   TRUNK : append to the first free slot; no-op if already a
+//           member or membership full.
 void node_set_intf_vlan_membsership(Node* node, char* intf_name, unsigned int vlan_id){
     Interface* intf = get_node_if_by_name(node, intf_name);
     assert(intf);
-    // ch7 implements the real per-mode VLAN slot logic; for ch6 we
-    // just stamp the first slot so a TRUNK port has *something*.
-    if(IF_L2_MODE(intf) == ACCESS || IF_L2_MODE(intf) == TRUNK){
-        intf->intf_nw_props.vlans[0] = vlan_id;
+
+    if(IS_INTF_L3_MODE(intf)){
+        printf("Error : Interface %s : L3 mode enabled\n", intf->if_name);
+        return;
     }
+    if(IF_L2_MODE(intf) != ACCESS && IF_L2_MODE(intf) != TRUNK){
+        printf("Error : Interface %s : L2 mode not Enabled\n", intf->if_name);
+        return;
+    }
+    if(IF_L2_MODE(intf) == ACCESS){
+        intf->intf_nw_props.vlans[0] = vlan_id;
+        return;
+    }
+    // TRUNK.
+    unsigned int* free_slot = 0;
+    for(unsigned int i = 0; i < MAX_VLAN_MEMBERSHIP; i++){
+        if(!free_slot && intf->intf_nw_props.vlans[i] == 0){
+            free_slot = &intf->intf_nw_props.vlans[i];
+        } else if(intf->intf_nw_props.vlans[i] == vlan_id){
+            return;
+        }
+    }
+    if(free_slot){
+        *free_slot = vlan_id;
+        return;
+    }
+    printf("Error : Interface %s : Max Vlan membership limit reached\n", intf->if_name);
+}
+
+// ----------------- ch7: VLAN packet rewrite -------------------------------
+
+// In-place tag of an untagged ethernet frame. Returns the new
+// total packet size (4 bytes larger). If the frame is already
+// tagged, the existing VID is overwritten and size is unchanged.
+unsigned int tag_pkt_with_vlan_id(EthernetHdr* eth, unsigned int total_pkt_size, int vlan_id){
+    Vlan8021qHdr* existing = is_pkt_vlan_tagged(eth);
+    if(existing){
+        unsigned int payload_size = total_pkt_size - VLAN_ETH_HDR_SIZE_EXCL_PAYLOAD;
+        existing->tci_vid = (short)vlan_id;
+        VLAN_ETH_FCS((VlanEthernetHdr*)eth, payload_size) = 0;
+        return total_pkt_size;
+    }
+    // Snapshot the untagged frame, then splice the VLAN tag in.
+    char* tmp = calloc(1, total_pkt_size);
+    memcpy(tmp, (char*)eth, total_pkt_size);
+
+    unsigned int     payload_size = total_pkt_size - ETH_HDR_SIZE_EXCL_PAYLOAD;
+    VlanEthernetHdr* veth         = (VlanEthernetHdr*)eth;
+    EthernetHdr*     old          = (EthernetHdr*)tmp;
+
+    veth->vlan_8021q_hdr.tpid    = VLAN_8021Q_PROTO;
+    veth->vlan_8021q_hdr.tci_pcp = 0;
+    veth->vlan_8021q_hdr.tci_dei = 0;
+    veth->vlan_8021q_hdr.tci_vid = (short)vlan_id;
+
+    // Shift the (type + payload + FCS) tail forward by 4 bytes.
+    memcpy((char*)&veth->type, (char*)&old->type,
+           sizeof(old->type) + payload_size + sizeof(old->FCS));
+    VLAN_ETH_FCS(veth, payload_size) = 0;
+    free(tmp);
+
+    return total_pkt_size + sizeof(Vlan8021qHdr);
+}
+
+// In-place untag. Returns the new total packet size (4 bytes
+// smaller). No-op + same size if the frame wasn't tagged.
+unsigned int untag_pkt_with_vlan_id(EthernetHdr* eth, unsigned int total_pkt_size){
+    Vlan8021qHdr* tag = is_pkt_vlan_tagged(eth);
+    if(!tag){
+        return total_pkt_size;
+    }
+    VlanEthernetHdr* old = calloc(1, total_pkt_size);
+    memcpy((char*)old, (char*)eth, total_pkt_size);
+    unsigned int payload_size = total_pkt_size - VLAN_ETH_HDR_SIZE_EXCL_PAYLOAD;
+    memcpy((char*)&eth->type, (char*)&old->type,
+           sizeof(eth->type) + payload_size + sizeof(eth->FCS));
+    ETH_FCS(eth, payload_size) = 0;
+    free(old);
+    return total_pkt_size - sizeof(Vlan8021qHdr);
 }

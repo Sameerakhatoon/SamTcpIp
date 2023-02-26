@@ -5,6 +5,7 @@
 // Forward declarations.
 Graph* build_first_topo(void);
 Graph* build_simple_l2_switch_topo(void);
+Graph* build_vlan_l2_switch_topo(void);
 
 // First topology: a 3-node L3 ring used to smoke-test both the
 // graph layer and the ch2 network-properties layer.
@@ -95,6 +96,54 @@ Graph* build_simple_l2_switch_topo(void){
     node_set_intf_l2_mode(sw, "eth0/5", ACCESS);
     node_set_intf_l2_mode(sw, "eth0/7", ACCESS);
     node_set_intf_l2_mode(sw, "eth0/8", ACCESS);
+
+    return topo;
+}
+
+// ch7: VLAN topology. Same three-host shape as ch6 but the switch's
+// ports carry VLAN assignments:
+//   H1 + H2 in vlan 10, H3 in vlan 20.
+// Hosts share 10.1.1.0/24 IP-wise, so H1 ARP for H2 (same vlan) must
+// succeed and H1 ARP for H3 (different vlan) must NOT reach H3.
+//
+//        H1 (10.1.1.1/24)            H2 (10.1.1.2/24)
+//        eth0/4                      eth0/6
+//          |                           |
+//          | eth0/5 access vlan 10     | eth0/7 access vlan 10
+//          |                           |
+//        L2SW
+//          | eth0/9 access vlan 20
+//          |
+//        eth0/3
+//        H3 (10.1.1.3/24)
+//
+Graph* build_vlan_l2_switch_topo(void){
+    Graph* topo = create_new_graph("VLAN L2 Switch Topology");
+    Node*  h1   = create_graph_node(topo, "H1");
+    Node*  h2   = create_graph_node(topo, "H2");
+    Node*  h3   = create_graph_node(topo, "H3");
+    Node*  sw   = create_graph_node(topo, "L2SW");
+
+    insert_link_between_two_nodes(h1, sw, "eth0/4", "eth0/5", 1);
+    insert_link_between_two_nodes(h2, sw, "eth0/6", "eth0/7", 1);
+    insert_link_between_two_nodes(h3, sw, "eth0/3", "eth0/9", 1);
+
+    node_set_device_type(h1, L3_ROUTER);
+    node_set_intf_ip_address(h1, "eth0/4", "10.1.1.1", 24);
+
+    node_set_device_type(h2, L3_ROUTER);
+    node_set_intf_ip_address(h2, "eth0/6", "10.1.1.2", 24);
+
+    node_set_device_type(h3, L3_ROUTER);
+    node_set_intf_ip_address(h3, "eth0/3", "10.1.1.3", 24);
+
+    node_set_device_type(sw, L2_SWITCH);
+    node_set_intf_l2_mode(sw, "eth0/5", ACCESS);
+    node_set_intf_vlan_membsership(sw, "eth0/5", 10);
+    node_set_intf_l2_mode(sw, "eth0/7", ACCESS);
+    node_set_intf_vlan_membsership(sw, "eth0/7", 10);
+    node_set_intf_l2_mode(sw, "eth0/9", ACCESS);
+    node_set_intf_vlan_membsership(sw, "eth0/9", 20);
 
     return topo;
 }

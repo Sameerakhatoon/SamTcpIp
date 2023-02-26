@@ -120,6 +120,13 @@ bool node_unset_intf_ip_address(Node* node, char* local_if);
 // configured subnet contains `ip_addr`. Used by ARP / routing.
 Interface* node_get_matching_subnet_interface(Node* node, char* ip_addr);
 
+// ch7: VLAN membership helpers. ACCESS version asserts that the
+// interface is in ACCESS mode and returns vlans[0] (0 if none).
+// TRUNK version asserts TRUNK and returns true iff vlan_id appears
+// in the membership list.
+unsigned int get_access_intf_operating_vlan_id(Interface* intf);
+bool         is_trunk_interface_vlan_enabled(Interface* intf, unsigned int vlan_id);
+
 // Network-aware dumps.
 void dump_nw_graph(Graph* graph);
 void dump_node_nw_props(Node* node);

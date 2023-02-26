@@ -42,7 +42,63 @@ typedef struct EthernetHdr {
     unsigned int FCS;                // unused; kept for layout
 } EthernetHdr;
 
+// ch7: 802.1Q VLAN tag - 4 bytes spliced between src_mac and type
+// in a tagged frame. Bit-fields packed into the 16-bit tci word.
+#define VLAN_8021Q_PROTO 0x8100
+
+typedef struct Vlan8021qHdr {
+    short tpid;             // == 0x8100 in a tagged frame
+    short tci_pcp : 3;      // priority code point (unused here)
+    short tci_dei : 1;      // drop-eligible indicator (unused)
+    short tci_vid : 12;     // 12-bit VLAN ID 1..4094
+} Vlan8021qHdr;
+
+typedef struct VlanEthernetHdr {
+    MacAddr      dst_mac;
+    MacAddr      src_mac;
+    Vlan8021qHdr vlan_8021q_hdr;
+    short        type;
+    char         payload[248];
+    unsigned int FCS;
+} VlanEthernetHdr;
+
 #pragma pack(pop)
+
+// Sizes excluding payload. FCS sits AFTER payload bytes, so we
+// subtract only the payload[].
+#define ETH_HDR_SIZE_EXCL_PAYLOAD       (sizeof(EthernetHdr)     - 248)
+#define VLAN_ETH_HDR_SIZE_EXCL_PAYLOAD  (sizeof(VlanEthernetHdr) - 248)
+
+// FCS lives at `payload + payload_size`.
+#define ETH_FCS(eth_ptr, payload_size) \
+    (*(unsigned int*)((char*)((eth_ptr)->payload) + (payload_size)))
+#define VLAN_ETH_FCS(veth_ptr, payload_size) \
+    (*(unsigned int*)((char*)((veth_ptr)->payload) + (payload_size)))
+
+// Bytes 13..14 of any frame: in an untagged frame those are the
+// ether-type; in a tagged frame they are the tpid (0x8100). Test
+// that.
+static inline Vlan8021qHdr* is_pkt_vlan_tagged(EthernetHdr* eth){
+    Vlan8021qHdr* v =
+        (Vlan8021qHdr*)((char*)eth + (sizeof(MacAddr) * 2));
+    if(v->tpid == (short)VLAN_8021Q_PROTO){
+        return v;
+    }
+    return 0;
+}
+
+static inline unsigned int GET_802_1Q_VLAN_ID(Vlan8021qHdr* v){
+    return (unsigned int)v->tci_vid;
+}
+
+// Tagged + untagged share dst_mac/src_mac. The payload sits at
+// different offsets; this helper picks the right one.
+static inline char* GET_ETHERNET_HDR_PAYLOAD(EthernetHdr* eth){
+    if(is_pkt_vlan_tagged(eth)){
+        return ((VlanEthernetHdr*)eth)->payload;
+    }
+    return eth->payload;
+}
 
 // ch5: per-Node ARP cache.
 struct ArpTable {
@@ -58,31 +114,64 @@ struct ArpEntry {
 };
 GLTHREAD_TO_STRUCT(arp_glue_to_arp_entry, ArpEntry, arp_glue);
 
-// L2 acceptance gate. ch6 rewrite for the L2-mode/L3-mode split:
-//   - Not configured in either mode -> reject.
-//   - L2 mode (ACCESS / TRUNK) -> accept everything; MAC-based
-//     filtering happens (or doesn't) further up at the L2 switch.
-//   - L3 mode -> accept only frames whose dst MAC matches our own,
-//     or that carry the all-ones broadcast MAC.
+// ch5/6/7 helpers used by the qualifier below.
+extern unsigned int get_access_intf_operating_vlan_id(Interface* intf);
+extern bool         is_trunk_interface_vlan_enabled(Interface* intf, unsigned int vlan_id);
+
+// ch7: L2 acceptance gate, full VLAN-aware version. Returns true if
+// the frame should be admitted to the receiving stack. If non-zero
+// is written to *vlan_id_out, the caller must tag the frame with
+// that VLAN before forwarding (case 6: untagged ingress on an
+// ACCESS port that has a VLAN assigned).
+//
+// Decision table mirrors the PDF's "Frame Ingress" 10-case table.
 static inline bool l2_frame_recv_qualify_on_interface(Interface* intf,
-                                                      EthernetHdr* eth){
-    // Neither L2 nor L3 configured -> drop.
+                                                      EthernetHdr* eth,
+                                                      unsigned int* vlan_id_out){
+    *vlan_id_out = 0;
+    Vlan8021qHdr* tag = is_pkt_vlan_tagged(eth);
+
+    // case 10: neither L2 nor L3 configured -> drop.
     if(!IS_INTF_L3_MODE(intf) && IF_L2_MODE(intf) == L2_MODE_UNKNOWN){
         return false;
     }
-    // Pure L2 (ACCESS or TRUNK) -> always accept.
-    if(!IS_INTF_L3_MODE(intf)
-       && (IF_L2_MODE(intf) == ACCESS || IF_L2_MODE(intf) == TRUNK)){
+
+    if(IF_L2_MODE(intf) == ACCESS){
+        unsigned int intf_vlan = get_access_intf_operating_vlan_id(intf);
+        // case 3: ACCESS, no VLAN assigned, untagged frame -> accept.
+        // case 4: ACCESS, no VLAN assigned, tagged frame -> drop.
+        if(intf_vlan == 0){
+            return tag == 0;
+        }
+        // case 6: ACCESS, has VLAN, untagged frame -> tag and accept.
+        if(!tag){
+            *vlan_id_out = intf_vlan;
+            return true;
+        }
+        // case 5: ACCESS, has VLAN, tagged -> accept iff VLANs match.
+        return GET_802_1Q_VLAN_ID(tag) == intf_vlan;
+    }
+
+    if(IF_L2_MODE(intf) == TRUNK){
+        // cases 7, 8: TRUNK + untagged -> drop.
+        if(!tag){
+            return false;
+        }
+        // case 9: TRUNK + tagged -> accept iff VLAN is in our member list.
+        return is_trunk_interface_vlan_enabled(intf, GET_802_1Q_VLAN_ID(tag));
+    }
+
+    // L3 mode follows.
+    // case 2: L3 + tagged -> drop.
+    if(tag){
+        return false;
+    }
+    // case 1a: L3 + dst MAC matches us.
+    if(memcmp(IF_MAC(intf), eth->dst_mac.mac, sizeof(MacAddr)) == 0){
         return true;
     }
-    // L3 + dst MAC matches us.
-    if(IS_INTF_L3_MODE(intf)
-       && memcmp(IF_MAC(intf), eth->dst_mac.mac, sizeof(MacAddr)) == 0){
-        return true;
-    }
-    // L3 + broadcast.
-    if(IS_INTF_L3_MODE(intf)
-       && eth->dst_mac.mac[0] == (unsigned char)0xFF
+    // case 1b: L3 + broadcast.
+    if(eth->dst_mac.mac[0] == (unsigned char)0xFF
        && eth->dst_mac.mac[1] == (unsigned char)0xFF
        && eth->dst_mac.mac[2] == (unsigned char)0xFF
        && eth->dst_mac.mac[3] == (unsigned char)0xFF
@@ -107,6 +196,13 @@ void      arp_table_update_from_arp_reply(ArpTable* arp_table,
                                           ArpHdr* arp_hdr,
                                           Interface* iif);
 void      dump_arp_table(ArpTable* arp_table);
+
+// ch7: in-place packet tag / untag. Both return the new total
+// packet size (4 bytes bigger / smaller respectively). Pre-condition
+// for tag_pkt: the buffer behind `eth` has at least sizeof(Vlan8021qHdr)
+// bytes of room (our send/recv buffers are 2 KB so this is fine).
+unsigned int tag_pkt_with_vlan_id(EthernetHdr* eth, unsigned int total_pkt_size, int vlan_id);
+unsigned int untag_pkt_with_vlan_id(EthernetHdr* eth, unsigned int total_pkt_size);
 
 // ch6: equality test extracted as a macro since ch6's arp_table
 // fix needs it. (Old code memcmp'd whole structs which also
