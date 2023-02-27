@@ -1,7 +1,9 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include "Layer2/layer2.h"
+#include "Layer3/layer3.h"
 #include "cli.h"
 #include "comm.h"
 #include "graph.h"
@@ -13,9 +15,11 @@ static Node* find_node_by_name(const char* name);
 static int   show_topology_handler(int argc, char** argv);
 static int   show_node_arp_handler(int argc, char** argv);
 static int   show_node_mac_handler(int argc, char** argv);
+static int   show_node_route_handler(int argc, char** argv);
 static int   run_send_handler(int argc, char** argv);
 static int   run_node_resolve_arp_handler(int argc, char** argv);
 static int   config_l2mode_handler(int argc, char** argv);
+static int   config_route_handler(int argc, char** argv);
 void         nwcli_install(Graph* topo);
 
 // The CLI tree only ever needs a single Graph (the topology built at
@@ -71,6 +75,46 @@ static int show_node_mac_handler(int argc, char** argv){
         return 1;
     }
     dump_mac_table(NODE_MAC_TABLE(node));
+    return 0;
+}
+
+// ch8: `show node <node-name> route` - dump the L3 routing table.
+static int show_node_route_handler(int argc, char** argv){
+    if(argc != 1){
+        fprintf(stderr, "show node route: expected <node>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    dump_rt_table(NODE_RT_TABLE(node));
+    return 0;
+}
+
+// ch8: `config node <node> route <prefix> <mask> <gw_ip> <oif>` -
+// install a static route. gw_ip / oif may be "direct" / "-" to add
+// a directly-connected route with no next hop.
+static int config_route_handler(int argc, char** argv){
+    if(argc != 5){
+        fprintf(stderr, "config: expected <node> route <prefix> <mask> <gw_ip> <oif>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    char* prefix = argv[1];
+    int   mask   = atoi(argv[2]);
+    char* gw     = argv[3];
+    char* oif    = argv[4];
+    if(strcmp(gw, "direct") == 0 || strcmp(gw, "-") == 0){
+        rt_table_add_direct_route(NODE_RT_TABLE(node), prefix, (char)mask);
+    } else {
+        rt_table_add_route(NODE_RT_TABLE(node), prefix, (char)mask, gw, oif);
+    }
     return 0;
 }
 
@@ -168,9 +212,16 @@ static CliCmd cmd_show_node_mac = {
     .handler  = show_node_mac_handler,
     .help     = "dump the node's mac-learning table",
 };
+// show node <name> route
+static CliCmd cmd_show_node_route = {
+    .name     = "route",
+    .handler  = show_node_route_handler,
+    .help     = "dump the node's L3 routing table",
+};
 static CliCmd* show_node_name_children[] = {
     &cmd_show_node_arp,
     &cmd_show_node_mac,
+    &cmd_show_node_route,
     0,
 };
 
@@ -302,7 +353,50 @@ static CliCmd cmd_config_interface = {
     .help     = "interface <name> <subcommand>",
     .children = config_interface_children,
 };
-static CliCmd* config_node_name_children[] = { &cmd_config_interface, 0 };
+// config node <node> route <prefix> <mask> <gw> <oif>
+static CliCmd cmd_config_route_oif = {
+    .name     = "<oif>",
+    .capture  = true,
+    .handler  = config_route_handler,
+    .help     = "outgoing interface (or `-` for direct)",
+};
+static CliCmd* config_route_oif_children[] = { &cmd_config_route_oif, 0 };
+
+static CliCmd cmd_config_route_gw = {
+    .name     = "<gw>",
+    .capture  = true,
+    .help     = "next-hop IP (or `direct` for directly-connected)",
+    .children = config_route_oif_children,
+};
+static CliCmd* config_route_gw_children[] = { &cmd_config_route_gw, 0 };
+
+static CliCmd cmd_config_route_mask = {
+    .name     = "<mask>",
+    .capture  = true,
+    .help     = "prefix length 0..32",
+    .children = config_route_gw_children,
+};
+static CliCmd* config_route_mask_children[] = { &cmd_config_route_mask, 0 };
+
+static CliCmd cmd_config_route_prefix = {
+    .name     = "<prefix>",
+    .capture  = true,
+    .help     = "destination prefix (dotted-quad)",
+    .children = config_route_mask_children,
+};
+static CliCmd* config_route_prefix_children[] = { &cmd_config_route_prefix, 0 };
+
+static CliCmd cmd_config_route = {
+    .name     = "route",
+    .help     = "route <prefix> <mask> <gw> <oif>",
+    .children = config_route_prefix_children,
+};
+
+static CliCmd* config_node_name_children[] = {
+    &cmd_config_interface,
+    &cmd_config_route,
+    0,
+};
 
 static CliCmd cmd_config_node_name = {
     .name     = "<node-name>",

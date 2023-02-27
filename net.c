@@ -23,11 +23,17 @@ void                dump_nw_graph(Graph* graph);
 void                dump_node_nw_props(Node* node);
 void                dump_intf_props(Interface* intf);
 
-// ch5/ch6: opaque-friendly init. The full ArpTable / MacTable
-// types live in Layer2/layer2.h; these trampolines keep net.c
-// free of layer2 includes.
+// ch5/6/8: opaque-friendly init. Full table types live next to
+// their owning module (Layer2/layer2.h for L2 tables, Layer3/layer3.h
+// for the routing table); these trampolines keep net.c free of
+// layer-specific includes.
 extern void init_arp_table(ArpTable** arp_table);
 extern void init_mac_table(MacTable** mac_table);
+extern void init_rt_table(RtTable** rt_table);
+
+// ch8: auto-install a directly-connected route when an interface
+// IP or the loopback gets assigned.
+extern void rt_table_add_direct_route(RtTable* rt_table, char* ip_addr, char mask);
 
 // Cheap multiplicative hash used to derive a 4-byte MAC seed from
 // any pointer's content. Not a real OUI - just stable-within-a-run
@@ -49,8 +55,10 @@ void init_node_nw_prop(NodeNwProp* p){
     memset(p->lb_addr.ip_addr, 0, sizeof(p->lb_addr.ip_addr));
     // ch5: every Node gets an empty ARP table at creation time.
     init_arp_table(&p->arp_table);
-    // ch6: and an empty mac-learning table.
+    // ch6: empty mac-learning table.
     init_mac_table(&p->mac_table);
+    // ch8: empty L3 routing table.
+    init_rt_table(&p->rt_table);
 }
 
 void init_intf_nw_prop(IntfNwProps* p){
@@ -91,6 +99,8 @@ bool node_set_loopback_address(Node* node, char* ip_addr){
     node->node_nw_prop.is_lb_addr_config = true;
     strncpy(NODE_LO_ADDR(node), ip_addr, 15);
     NODE_LO_ADDR(node)[15] = '\0';
+    // ch8: loopback is a /32 self-route.
+    rt_table_add_direct_route(NODE_RT_TABLE(node), ip_addr, 32);
     ok = true;
     return ok;
 }
@@ -105,6 +115,9 @@ bool node_set_intf_ip_address(Node* node, char* local_if, char* ip_addr, char ma
     IF_IP(intf)[15] = '\0';
     intf->intf_nw_props.mask           = mask;
     intf->intf_nw_props.is_ipadd_config = true;
+    // ch8: bringing up an L3 interface installs the corresponding
+    // directly-connected subnet route.
+    rt_table_add_direct_route(NODE_RT_TABLE(node), ip_addr, mask);
     ok = true;
 out:
     return ok;

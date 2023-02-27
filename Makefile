@@ -34,7 +34,7 @@ build/cli.o: cli.c cli.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c cli.c -o build/cli.o
 
-build/nwcli.o: nwcli.c nwcli.h cli.h graph.h net.h comm.h Layer2/layer2.h
+build/nwcli.o: nwcli.c nwcli.h cli.h graph.h net.h comm.h Layer2/layer2.h Layer3/layer3.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c nwcli.c -o build/nwcli.o
 
@@ -54,7 +54,7 @@ build/Layer2/l2switch.o: Layer2/l2switch.c Layer2/layer2.h graph.h net.h utils.h
 	@mkdir -p build/Layer2
 	$(CC) $(CFLAGS) -c Layer2/l2switch.c -o build/Layer2/l2switch.o
 
-build/Layer3/layer3.o: Layer3/layer3.c graph.h
+build/Layer3/layer3.o: Layer3/layer3.c Layer3/layer3.h graph.h net.h utils.h
 	@mkdir -p build/Layer3
 	$(CC) $(CFLAGS) -c Layer3/layer3.c -o build/Layer3/layer3.o
 

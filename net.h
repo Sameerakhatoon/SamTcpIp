@@ -20,10 +20,13 @@ typedef struct Node      Node;
 typedef struct Interface Interface;
 typedef struct Graph     Graph;
 
-// ch5/ch6: opaque pointers to the per-Node L2 tables; full types in
-// Layer2/layer2.h. Net layer never dereferences them.
+// ch5/ch6/ch8: opaque pointers to the per-Node tables. Full types
+// live next to their owning module (Layer2/layer2.h for the L2
+// tables, Layer3/layer3.h for the routing table). Net layer never
+// dereferences them.
 typedef struct ArpTable  ArpTable;
 typedef struct MacTable  MacTable;
+typedef struct RtTable   RtTable;
 
 // Device-type bit flags. A Node can be a router, an L2 switch, a
 // hub, or any combination (router-bridge etc).
@@ -79,6 +82,7 @@ struct NodeNwProp {
     unsigned int flags;              // L3_ROUTER | L2_SWITCH | HUB
     ArpTable*    arp_table;          // ch5: per-Node ARP cache
     MacTable*    mac_table;          // ch6: per-Node mac-learning table
+    RtTable*     rt_table;           // ch8: per-Node L3 routing table
     bool         is_lb_addr_config;
     IpAddr       lb_addr;
 };
@@ -107,6 +111,7 @@ void init_intf_nw_prop(IntfNwProps* p);
 #define NODE_LO_ADDR(node_ptr)   ((char*)((node_ptr)->node_nw_prop.lb_addr.ip_addr))
 #define NODE_ARP_TABLE(node_ptr) ((node_ptr)->node_nw_prop.arp_table)
 #define NODE_MAC_TABLE(node_ptr) ((node_ptr)->node_nw_prop.mac_table)
+#define NODE_RT_TABLE(node_ptr)  ((node_ptr)->node_nw_prop.rt_table)
 
 void interface_assign_mac_address(Interface* intf);
 
