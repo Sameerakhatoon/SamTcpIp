@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include "Layer2/layer2.h"
 #include "Layer3/layer3.h"
+#include "Layer5/ping.h"
 #include "cli.h"
 #include "comm.h"
 #include "graph.h"
@@ -191,11 +192,13 @@ static int run_node_resolve_arp_handler(int argc, char** argv){
     return 0;
 }
 
-// ch9: `run node <node> ping <ip>` - originate an IP packet from
-// the node's loopback to <ip>, payload "ping". Goes through the
-// full L3 forwarding pipeline (LPM -> ARP -> L2 send). Caller must
-// have ARP entries pre-resolved (or accept that the first attempt
-// will fire an ARP request and drop the packet, per the pipeline).
+// ch10: `run node <node> ping <ip>` - real ping app.
+//
+// First call to a given dst will ARP-miss (the L3 pipeline drops
+// the request, fires a broadcast). To get a deterministic reply
+// without forcing the user to manually pre-resolve, we send 3
+// pings with sleeps between: #1 seeds the ARP cache, #2/#3 should
+// round-trip and print "Ping reply ...".
 static int run_node_ping_handler(int argc, char** argv){
     if(argc != 2){
         fprintf(stderr, "run node ping: expected <node> <ip>\n");
@@ -206,16 +209,10 @@ static int run_node_ping_handler(int argc, char** argv){
         fprintf(stderr, "no such node `%s`\n", argv[0]);
         return 1;
     }
-    unsigned int dst = 0;
-    if(inet_pton(AF_INET, argv[1], &dst) != 1){
-        fprintf(stderr, "bad ip `%s`\n", argv[1]);
-        return 1;
+    for(short seq = 1; seq <= 3; seq++){
+        ping_send_request(node, argv[1], seq);
+        usleep(200 * 1000);
     }
-    dst = htonl(dst);
-    char payload[] = "ping";
-    demote_packet_to_layer3(node, payload, sizeof(payload), IP_HDR_TYPE, dst);
-    // Let the receiver thread process.
-    usleep(200 * 1000);
     return 0;
 }
 
@@ -489,6 +486,7 @@ static CliCmd cmd_root = {
 void nwcli_install(Graph* topo){
     g_topo = topo;
     cli_set_root(&cmd_root);
+    ping_register();
     network_start_pkt_receiver_thread(topo);
     usleep(50 * 1000);
 }

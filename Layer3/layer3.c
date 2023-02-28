@@ -15,8 +15,10 @@
 static bool _rt_table_entry_add(RtTable* rt_table, L3Route* l3_route);
 static bool l3_is_direct_route(L3Route* route);
 static bool is_layer3_local_delivery(Node* node, unsigned int dst_ip);
-static void promote_pkt_to_layer4(Node* node, Interface* iif, char* l4_hdr,
-                                  size_t pkt_size, int l4_protocol_number);
+static void promote_pkt_to_layer4(Node* node, Interface* iif, IpHdr* ip_hdr,
+                                  char* l4_hdr, size_t pkt_size,
+                                  int l4_protocol_number);
+void        l3_register_l4_handler(int protocol_number, L4Handler handler);
 static void layer3_pkt_push_down_to_layer2_for_l2routing(
         Node* node, unsigned int next_hop_ip,
         char* outgoing_intf_name, char* pkt, size_t pkt_size);
@@ -211,10 +213,27 @@ static bool is_layer3_local_delivery(Node* node, unsigned int dst_ip){
     return false;
 }
 
-static void promote_pkt_to_layer4(Node* node, Interface* iif, char* l4_hdr,
-                                  size_t pkt_size, int l4_protocol_number){
-    // ch9: stub. ch10's ping/traceroute will lower a real handler in
-    // here. Print enough to confirm end-to-end delivery in tests.
+// ch10: per-protocol L4 handler table. 256 slots indexed by the IP
+// `protocol` field. Set by app code via l3_register_l4_handler.
+static L4Handler l4_handlers[256] = {0};
+
+void l3_register_l4_handler(int protocol_number, L4Handler handler){
+    if(protocol_number < 0 || protocol_number >= 256){
+        return;
+    }
+    l4_handlers[protocol_number] = handler;
+}
+
+static void promote_pkt_to_layer4(Node* node, Interface* iif, IpHdr* ip_hdr,
+                                  char* l4_hdr, size_t pkt_size,
+                                  int l4_protocol_number){
+    if(l4_protocol_number >= 0 && l4_protocol_number < 256
+       && l4_handlers[l4_protocol_number]){
+        l4_handlers[l4_protocol_number](node, iif, ip_hdr, l4_hdr, pkt_size);
+        return;
+    }
+    // No handler registered for this protocol - fall back to the
+    // ch9 print so tests / debug still see something.
     printf("L4 Packet received : node %s : iif %s : proto %d : size %zu : payload `%s`\n",
            node->node_name,
            iif ? iif->if_name : "(self)",
@@ -304,7 +323,7 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
         if(is_layer3_local_delivery(node, ip_hdr->dst_ip)){
             char*  l4_hdr  = (char*)ip_hdr + sizeof(IpHdr);
             size_t l4_size = ip_hdr->total_length - sizeof(IpHdr);
-            promote_pkt_to_layer4(node, iif, l4_hdr, l4_size, ip_hdr->protocol);
+            promote_pkt_to_layer4(node, iif, ip_hdr, l4_hdr, l4_size, ip_hdr->protocol);
             return;
         }
         // case 2: dst sits in a directly-connected subnet -> resolve
@@ -354,13 +373,7 @@ void demote_packet_to_layer3(Node* node, char* pkt, size_t pkt_size,
     ip->protocol     = protocol_number;
     size_t hdr_bytes = sizeof(IpHdr);
     ip->total_length = (short)(hdr_bytes + pkt_size);
-
-    // src = loopback if configured else first L3 intf IP.
-    if(node->node_nw_prop.is_lb_addr_config){
-        inet_pton(AF_INET, NODE_LO_ADDR(node), &ip->src_ip);
-        ip->src_ip = htonl(ip->src_ip);
-    }
-    ip->dst_ip = dest_ip_address;
+    ip->dst_ip       = dest_ip_address;
 
     memcpy(buf + hdr_bytes, pkt, pkt_size);
 
@@ -370,10 +383,33 @@ void demote_packet_to_layer3(Node* node, char* pkt, size_t pkt_size,
         printf("L3 originate drop : %s : no route\n", node->node_name);
         return;
     }
+
+    // Pick src_ip = IP of the interface we'll send out of, so the
+    // receiver's reply can route back via direct-route lookup.
+    // Loopback is a poor source choice unless the receiver has a
+    // route for it.
+    Interface* src_intf = 0;
     if(l3_is_direct_route(route)){
-        // Direct: push to L2 with next-hop = dst itself (no router
-        // hop). Even if it's a self IP we send to the wire - that
-        // would be ARP'd locally; for now this is fine.
+        char dst_str[16];
+        unsigned int net = htonl(ip->dst_ip);
+        inet_ntop(AF_INET, &net, dst_str, 16);
+        dst_str[15] = '\0';
+        src_intf = node_get_matching_subnet_interface(node, dst_str);
+    } else {
+        src_intf = get_node_if_by_name(node, route->oif);
+    }
+    if(src_intf){
+        unsigned int src_net = 0;
+        inet_pton(AF_INET, IF_IP(src_intf), &src_net);
+        ip->src_ip = htonl(src_net);
+    } else if(node->node_nw_prop.is_lb_addr_config){
+        // Last-resort fallback.
+        unsigned int lb_net = 0;
+        inet_pton(AF_INET, NODE_LO_ADDR(node), &lb_net);
+        ip->src_ip = htonl(lb_net);
+    }
+
+    if(l3_is_direct_route(route)){
         layer3_pkt_push_down_to_layer2_for_l2routing(
                 node, ip->dst_ip, NULL, buf, ip->total_length);
         return;

@@ -97,6 +97,17 @@ L3Route* l3rib_lookup_lpm(RtTable* rt_table, unsigned int dest_ip);
      strncmp((a)->gw_ip, (b)->gw_ip, 16) == 0 &&          \
      strncmp((a)->oif,   (b)->oif, IF_NAME_SIZE) == 0)
 
+// ---- ch10: per-protocol L4 handler registry -----------------------------
+//
+// Apps (ping etc) call `l3_register_l4_handler` to install a
+// callback keyed by the IP protocol number. `promote_pkt_to_layer4`
+// looks it up after stripping the IP header. The IpHdr is passed
+// through so the handler can read src_ip/dst_ip for the response.
+
+typedef void (*L4Handler)(Node* node, Interface* iif, struct IpHdr* ip_hdr,
+                          char* l4_payload, size_t l4_payload_size);
+void l3_register_l4_handler(int protocol_number, L4Handler handler);
+
 // ---- ch9: forwarding pipeline -------------------------------------------
 
 // L3 ingress from L2 (L2 hdr already chopped). `pkt` points at the
