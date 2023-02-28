@@ -10,7 +10,7 @@
 #include "layer2.h"
 
 // Forward declarations.
-static void promote_pkt_to_layer3(Node* node, Interface* iif, char* pkt, size_t pkt_size);
+static void promote_pkt_to_layer3(Node* node, Interface* iif, char* pkt, size_t pkt_size, int proto);
 static void send_arp_reply_msg(EthernetHdr* eth_in, Interface* oif);
 static void process_arp_broadcast_request(Node* node, Interface* iif, EthernetHdr* eth);
 static void process_arp_reply_msg(Node* node, Interface* iif, EthernetHdr* eth);
@@ -30,11 +30,14 @@ void        node_set_intf_vlan_membsership(Node* node, char* intf_name, unsigned
 // ch6: hand-off when the recv interface is in ACCESS / TRUNK mode.
 extern void l2_switch_recv_frame(Interface* iif, char* pkt, size_t pkt_size);
 
-// Stub - real layer3 lands in ch9.
-extern void layer3_pkt_recv(Node* node, Interface* iif, char* pkt, size_t pkt_size);
+// ch9: real L3 receive entry point (declared in Layer3/layer3.h).
+extern void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
+                                        char* pkt, size_t pkt_size,
+                                        int   l3_protocol_number);
 
-static void promote_pkt_to_layer3(Node* node, Interface* iif, char* pkt, size_t pkt_size){
-    layer3_pkt_recv(node, iif, pkt, pkt_size);
+static void promote_pkt_to_layer3(Node* node, Interface* iif, char* pkt,
+                                  size_t pkt_size, int proto){
+    layer3_pkt_recv_from_layer2(node, iif, pkt, pkt_size, proto);
 }
 
 // ---- ARP table -----------------------------------------------------------
@@ -249,8 +252,24 @@ void layer2_frame_recv(Node* node, Interface* iif, char* pkt, size_t pkt_size){
                 }
                 break;
             }
+            case IP_HDR_TYPE: {
+                // ch9: chop the L2 header before handing up. Payload
+                // size = total - L2 header (no FCS in our payload size
+                // calculation: pkt_size already excludes the trailing
+                // FCS field as set by the sender).
+                char*  payload  = GET_ETHERNET_HDR_PAYLOAD(eth);
+                size_t hdr_size = is_pkt_vlan_tagged(eth)
+                                  ? VLAN_ETH_HDR_SIZE_EXCL_PAYLOAD
+                                  : ETH_HDR_SIZE_EXCL_PAYLOAD;
+                size_t l3_size  = pkt_size - hdr_size;
+                promote_pkt_to_layer3(node, iif, payload, l3_size, IP_HDR_TYPE);
+                break;
+            }
             default:
-                promote_pkt_to_layer3(node, iif, pkt, pkt_size);
+                // Unknown ether-type: kept the old behavior of
+                // promoting to L3 so existing ch5 "L2 Frame" tests
+                // still report something. Real stacks would drop.
+                promote_pkt_to_layer3(node, iif, pkt, pkt_size, eth->type);
                 break;
         }
         return;

@@ -1,3 +1,4 @@
+#include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,7 @@ static int   show_node_mac_handler(int argc, char** argv);
 static int   show_node_route_handler(int argc, char** argv);
 static int   run_send_handler(int argc, char** argv);
 static int   run_node_resolve_arp_handler(int argc, char** argv);
+static int   run_node_ping_handler(int argc, char** argv);
 static int   config_l2mode_handler(int argc, char** argv);
 static int   config_route_handler(int argc, char** argv);
 void         nwcli_install(Graph* topo);
@@ -189,6 +191,34 @@ static int run_node_resolve_arp_handler(int argc, char** argv){
     return 0;
 }
 
+// ch9: `run node <node> ping <ip>` - originate an IP packet from
+// the node's loopback to <ip>, payload "ping". Goes through the
+// full L3 forwarding pipeline (LPM -> ARP -> L2 send). Caller must
+// have ARP entries pre-resolved (or accept that the first attempt
+// will fire an ARP request and drop the packet, per the pipeline).
+static int run_node_ping_handler(int argc, char** argv){
+    if(argc != 2){
+        fprintf(stderr, "run node ping: expected <node> <ip>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    unsigned int dst = 0;
+    if(inet_pton(AF_INET, argv[1], &dst) != 1){
+        fprintf(stderr, "bad ip `%s`\n", argv[1]);
+        return 1;
+    }
+    dst = htonl(dst);
+    char payload[] = "ping";
+    demote_packet_to_layer3(node, payload, sizeof(payload), IP_HDR_TYPE, dst);
+    // Let the receiver thread process.
+    usleep(200 * 1000);
+    return 0;
+}
+
 // ---- command tree --------------------------------------------------------
 // Children arrays are NULL-terminated. Built bottom-up so each
 // parent's child pointer table is in scope.
@@ -296,7 +326,27 @@ static CliCmd cmd_run_node_resolve = {
     .help     = "send an ARP broadcast for <ip>",
     .children = run_node_resolve_ip_children,
 };
-static CliCmd* run_node_name_children[] = { &cmd_run_node_resolve, 0 };
+
+// run node <name> ping <ip>
+static CliCmd cmd_run_node_ping_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .handler  = run_node_ping_handler,
+    .help     = "destination IP to ping",
+};
+static CliCmd* run_node_ping_ip_children[] = { &cmd_run_node_ping_ip, 0 };
+
+static CliCmd cmd_run_node_ping = {
+    .name     = "ping",
+    .help     = "originate an IP datagram with payload `ping` to <ip>",
+    .children = run_node_ping_ip_children,
+};
+
+static CliCmd* run_node_name_children[] = {
+    &cmd_run_node_resolve,
+    &cmd_run_node_ping,
+    0,
+};
 
 static CliCmd cmd_run_node_name = {
     .name     = "<node-name>",

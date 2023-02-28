@@ -3,14 +3,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../comm.h"
 #include "../graph.h"
 #include "../gluethread/glthread.h"
 #include "../net.h"
 #include "../utils.h"
+#include "../Layer2/layer2.h"
 #include "layer3.h"
 
 // Forward declarations.
 static bool _rt_table_entry_add(RtTable* rt_table, L3Route* l3_route);
+static bool l3_is_direct_route(L3Route* route);
+static bool is_layer3_local_delivery(Node* node, unsigned int dst_ip);
+static void promote_pkt_to_layer4(Node* node, Interface* iif, char* l4_hdr,
+                                  size_t pkt_size, int l4_protocol_number);
+static void layer3_pkt_push_down_to_layer2_for_l2routing(
+        Node* node, unsigned int next_hop_ip,
+        char* outgoing_intf_name, char* pkt, size_t pkt_size);
+static void ip_int_to_str(unsigned int ip_host_order, char* out16);
+
 void        init_rt_table(RtTable** rt_table);
 L3Route*    rt_table_lookup(RtTable* rt_table, char* ip_addr, char mask);
 void        clear_rt_table(RtTable* rt_table);
@@ -20,7 +31,11 @@ void        rt_table_add_route(RtTable* rt_table, char* dst, char mask,
 void        rt_table_add_direct_route(RtTable* rt_table, char* dst, char mask);
 void        dump_rt_table(RtTable* rt_table);
 L3Route*    l3rib_lookup_lpm(RtTable* rt_table, unsigned int dest_ip);
-void        layer3_pkt_recv(Node* node, Interface* iif, char* pkt, size_t pkt_size);
+void        layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
+                                        char* pkt, size_t pkt_size,
+                                        int   l3_protocol_number);
+void        demote_packet_to_layer3(Node* node, char* pkt, size_t pkt_size,
+                                    int protocol_number, unsigned int dest_ip_address);
 
 // ---- routing table -------------------------------------------------------
 
@@ -29,8 +44,6 @@ void init_rt_table(RtTable** rt_table){
     init_glthread(&(*rt_table)->route_list);
 }
 
-// Exact-match lookup (key = dest + mask). Used by add/delete so we
-// can detect duplicates and replace.
 L3Route* rt_table_lookup(RtTable* rt_table, char* ip_addr, char mask){
     GlThread* cur = 0;
     ITERATE_GLTHREAD_BEGIN(&rt_table->route_list, cur){
@@ -64,15 +77,22 @@ void delete_rt_table_entry(RtTable* rt_table, char* ip_addr, char mask){
 
 // LPM: walk the list; track the longest mask whose prefix matches
 // `dest_ip` post-mask; fall back to 0.0.0.0/0 if present.
+//
+// ch9: `dest_ip` is in HOST byte order. The previous version called
+// `inet_ntop` on the host-order value directly which printed the
+// dotted-quad with bytes reversed (50.50.50.0 -> 0.50.50.50) so no
+// match was ever found. Convert back to network order before
+// stringifying.
 L3Route* l3rib_lookup_lpm(RtTable* rt_table, unsigned int dest_ip){
-    L3Route*  lpm           = 0;
-    L3Route*  default_route = 0;
-    char      longest_mask  = 0;
-    char      dest_ip_str[16];
-    char      subnet[16];
-    GlThread* cur = 0;
+    L3Route*     lpm           = 0;
+    L3Route*     default_route = 0;
+    char         longest_mask  = 0;
+    char         dest_ip_str[16];
+    char         subnet[16];
+    GlThread*    cur           = 0;
+    unsigned int net_order_ip  = htonl(dest_ip);
 
-    inet_ntop(AF_INET, &dest_ip, dest_ip_str, 16);
+    inet_ntop(AF_INET, &net_order_ip, dest_ip_str, 16);
     dest_ip_str[15] = '\0';
 
     ITERATE_GLTHREAD_BEGIN(&rt_table->route_list, cur){
@@ -85,7 +105,7 @@ L3Route* l3rib_lookup_lpm(RtTable* rt_table, unsigned int dest_ip){
             continue;
         }
         if(strncmp(subnet, r->dest, strlen(subnet)) == 0
-           && r->mask > longest_mask){
+           && r->mask >= longest_mask){
             longest_mask = r->mask;
             lpm          = r;
         }
@@ -130,8 +150,7 @@ void rt_table_add_direct_route(RtTable* rt_table, char* dst, char mask){
 //
 // Idempotent: `_rt_table_entry_add` does an exact (dest+mask)
 // lookup; if an identical row exists it returns false and we
-// silently free the duplicate allocation. No error reported,
-// because re-installing the same route is benign.
+// silently free the duplicate allocation.
 void rt_table_add_route(RtTable* rt_table, char* dst, char mask,
                         char* gw, char* oif){
     char prefix[16];
@@ -155,9 +174,213 @@ void rt_table_add_route(RtTable* rt_table, char* dst, char mask,
     }
 }
 
-// ---- packet receive (still a stub - ch9 wires forwarding) ---------------
+// ---- ch9: forwarding pipeline -------------------------------------------
 
-void layer3_pkt_recv(Node* node, Interface* iif, char* pkt, size_t pkt_size){
-    printf("Layer 3 Packet Recvd : Rcv Node %s, Intf : %s, data recvd : %s, pkt size : %zu\n",
-           node->node_name, iif->if_name, pkt, pkt_size);
+static bool l3_is_direct_route(L3Route* route){
+    return route->is_direct;
+}
+
+// Convert host-order IPv4 integer to dotted-quad string.
+static void ip_int_to_str(unsigned int ip_host_order, char* out16){
+    unsigned int net = htonl(ip_host_order);
+    inet_ntop(AF_INET, &net, out16, 16);
+    out16[15] = '\0';
+}
+
+// Does `dst_ip` (host byte order) match the loopback or any
+// configured interface IP on `node`?
+static bool is_layer3_local_delivery(Node* node, unsigned int dst_ip){
+    char dst_str[16];
+    ip_int_to_str(dst_ip, dst_str);
+
+    // Loopback.
+    if(node->node_nw_prop.is_lb_addr_config
+       && strncmp(NODE_LO_ADDR(node), dst_str, 16) == 0){
+        return true;
+    }
+    // Each configured interface.
+    for(unsigned int i = 0; i < MAX_INTF_PER_NODE; i++){
+        Interface* intf = node->intf[i];
+        if(!intf || !IS_INTF_L3_MODE(intf)){
+            continue;
+        }
+        if(strncmp(IF_IP(intf), dst_str, 16) == 0){
+            return true;
+        }
+    }
+    return false;
+}
+
+static void promote_pkt_to_layer4(Node* node, Interface* iif, char* l4_hdr,
+                                  size_t pkt_size, int l4_protocol_number){
+    // ch9: stub. ch10's ping/traceroute will lower a real handler in
+    // here. Print enough to confirm end-to-end delivery in tests.
+    printf("L4 Packet received : node %s : iif %s : proto %d : size %zu : payload `%s`\n",
+           node->node_name,
+           iif ? iif->if_name : "(self)",
+           l4_protocol_number,
+           pkt_size,
+           l4_hdr);
+}
+
+// Send `pkt` (an IP datagram, pkt_size bytes) out via L2. If
+// `outgoing_intf_name` is NULL the OIF is picked by subnet-match on
+// `next_hop_ip` (case: direct route, host on connected subnet).
+// `next_hop_ip` is in host byte order.
+//
+// ARP miss: fire a broadcast ARP request and drop this packet. Upper
+// layers can retransmit. This matches the reference's pseudocode.
+static void layer3_pkt_push_down_to_layer2_for_l2routing(
+        Node* node, unsigned int next_hop_ip,
+        char* outgoing_intf_name, char* pkt, size_t pkt_size){
+
+    char       next_hop_str[16];
+    Interface* oif = 0;
+
+    ip_int_to_str(next_hop_ip, next_hop_str);
+
+    if(outgoing_intf_name){
+        oif = get_node_if_by_name(node, outgoing_intf_name);
+        if(!oif){
+            printf("L3 send drop : %s : oif %s not found\n",
+                   node->node_name, outgoing_intf_name);
+            return;
+        }
+    } else {
+        oif = node_get_matching_subnet_interface(node, next_hop_str);
+        if(!oif){
+            printf("L3 send drop : %s : no matching subnet for %s\n",
+                   node->node_name, next_hop_str);
+            return;
+        }
+    }
+
+    ArpEntry* arp = arp_table_lookup(NODE_ARP_TABLE(node), next_hop_str);
+    if(!arp){
+        printf("L3 send : %s : ARP miss for %s, firing broadcast on %s\n",
+               node->node_name, next_hop_str, oif->if_name);
+        send_arp_broadcast_request(node, oif, next_hop_str);
+        return;
+    }
+
+    // Encap. Payload (IP datagram) must fit in our 248-byte payload[].
+    if(pkt_size > sizeof(((EthernetHdr*)0)->payload)){
+        printf("L3 send drop : %s : pkt too big (%zu)\n", node->node_name, pkt_size);
+        return;
+    }
+    EthernetHdr* eth = calloc(1, sizeof(EthernetHdr));
+    memcpy(eth->dst_mac.mac, arp->mac_addr.mac, sizeof(MacAddr));
+    memcpy(eth->src_mac.mac, IF_MAC(oif),       sizeof(MacAddr));
+    eth->type = IP_HDR_TYPE;
+    memcpy(eth->payload, pkt, pkt_size);
+    eth->FCS = 0;
+
+    send_pkt_out((char*)eth, ETH_HDR_SIZE_EXCL_PAYLOAD + pkt_size, oif);
+    free(eth);
+}
+
+// L3 ingress. `pkt` points at the IP header (L2 already chopped).
+void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
+                                 char* pkt, size_t pkt_size,
+                                 int   l3_protocol_number){
+    if(l3_protocol_number != IP_HDR_TYPE){
+        printf("L3 drop : %s : unknown protocol %d\n",
+               node->node_name, l3_protocol_number);
+        return;
+    }
+
+    IpHdr* ip_hdr = (IpHdr*)pkt;
+
+    L3Route* route = l3rib_lookup_lpm(NODE_RT_TABLE(node), ip_hdr->dst_ip);
+    if(!route){
+        printf("L3 drop : %s : no route for dst\n", node->node_name);
+        return;
+    }
+
+    if(l3_is_direct_route(route)){
+        // case 1: addressed to self -> local delivery. Use sizeof
+         // (IpHdr) rather than ihl*4 because our struct packs to 22
+         // bytes (short ttl/protocol/checksum); originate path agrees.
+        if(is_layer3_local_delivery(node, ip_hdr->dst_ip)){
+            char*  l4_hdr  = (char*)ip_hdr + sizeof(IpHdr);
+            size_t l4_size = ip_hdr->total_length - sizeof(IpHdr);
+            promote_pkt_to_layer4(node, iif, l4_hdr, l4_size, ip_hdr->protocol);
+            return;
+        }
+        // case 2: dst sits in a directly-connected subnet -> resolve
+        // dst MAC and push to L2 (no specific oif; let push-down pick).
+        layer3_pkt_push_down_to_layer2_for_l2routing(
+                node, ip_hdr->dst_ip, NULL,
+                (char*)ip_hdr, pkt_size);
+        return;
+    }
+
+    // case 3: indirect route -> decrement TTL then forward to gw.
+    ip_hdr->ttl--;
+    if(ip_hdr->ttl == 0){
+        printf("L3 drop : %s : TTL expired\n", node->node_name);
+        return;
+    }
+
+    unsigned int next_hop_ip = 0;
+    inet_pton(AF_INET, route->gw_ip, &next_hop_ip);
+    next_hop_ip = htonl(next_hop_ip);
+
+    layer3_pkt_push_down_to_layer2_for_l2routing(
+            node, next_hop_ip, route->oif,
+            (char*)ip_hdr, pkt_size);
+}
+
+// Originate path. Caller hands us a raw L4 payload + dst; we build
+// an IP header, then feed straight into the routing pipeline by
+// invoking the same primitives recv-from-L2 uses. We must NOT route
+// it back through `layer3_pkt_recv_from_layer2` because the local-
+// delivery check there would loop a self-addressed packet back to
+// L4 instead of sending it out the wire.
+void demote_packet_to_layer3(Node* node, char* pkt, size_t pkt_size,
+                             int protocol_number, unsigned int dest_ip_address){
+    if(pkt_size > 200){
+        printf("L3 originate drop : %s : payload too big\n", node->node_name);
+        return;
+    }
+    // Our IpHdr packs out to 22 bytes (ttl/protocol/checksum are
+     // `short` not `char`), so the L3 payload starts at sizeof(IpHdr)
+     // - not at ihl*4 = 20. Using ihl*4 would overrun dst_ip. Take
+     // the bigger of the two so receivers that chop at ihl*4 still
+     // see correct header fields.
+    char   buf[256] = {0};
+    IpHdr* ip = (IpHdr*)buf;
+    initialize_ip_hdr(ip);
+    ip->protocol     = protocol_number;
+    size_t hdr_bytes = sizeof(IpHdr);
+    ip->total_length = (short)(hdr_bytes + pkt_size);
+
+    // src = loopback if configured else first L3 intf IP.
+    if(node->node_nw_prop.is_lb_addr_config){
+        inet_pton(AF_INET, NODE_LO_ADDR(node), &ip->src_ip);
+        ip->src_ip = htonl(ip->src_ip);
+    }
+    ip->dst_ip = dest_ip_address;
+
+    memcpy(buf + hdr_bytes, pkt, pkt_size);
+
+    // Look up route + dispatch.
+    L3Route* route = l3rib_lookup_lpm(NODE_RT_TABLE(node), ip->dst_ip);
+    if(!route){
+        printf("L3 originate drop : %s : no route\n", node->node_name);
+        return;
+    }
+    if(l3_is_direct_route(route)){
+        // Direct: push to L2 with next-hop = dst itself (no router
+        // hop). Even if it's a self IP we send to the wire - that
+        // would be ARP'd locally; for now this is fine.
+        layer3_pkt_push_down_to_layer2_for_l2routing(
+                node, ip->dst_ip, NULL, buf, ip->total_length);
+        return;
+    }
+    unsigned int next_hop_ip = 0;
+    inet_pton(AF_INET, route->gw_ip, &next_hop_ip);
+    next_hop_ip = htonl(next_hop_ip);
+    layer3_pkt_push_down_to_layer2_for_l2routing(
+            node, next_hop_ip, route->oif, buf, ip->total_length);
 }

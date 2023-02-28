@@ -17,6 +17,7 @@
 #define ARP_BROAD_REQ   1
 #define ARP_REPLY       2
 #define ARP_MSG         806
+#define IP_HDR_TYPE     0x0800     // ether-type for IPv4
 #define BROADCAST_MAC   0xFFFFFFFFFFFFULL
 
 // All on-wire structs packed so members sit at byte-tight offsets.

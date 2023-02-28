@@ -15,5 +15,5 @@ Tracking the build, one chapter at a time.
 - [x] ch6: Layer 2 - MAC-based forwarding, mac table
 - [x] ch7: Layer 2 - VLAN support, tagging / untagging, VLAN-aware forwarding
 - [x] ch8: Layer 3 - route installation (RtTable, LPM, static + auto-direct)
-- [ ] ch9: Layer 3 - L3 routing
+- [x] ch9: Layer 3 - L3 routing (forwarding pipeline, originate, local delivery)
 - [ ] ch10: application - ping, traceroute

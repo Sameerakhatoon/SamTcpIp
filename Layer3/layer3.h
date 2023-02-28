@@ -97,4 +97,19 @@ L3Route* l3rib_lookup_lpm(RtTable* rt_table, unsigned int dest_ip);
      strncmp((a)->gw_ip, (b)->gw_ip, 16) == 0 &&          \
      strncmp((a)->oif,   (b)->oif, IF_NAME_SIZE) == 0)
 
+// ---- ch9: forwarding pipeline -------------------------------------------
+
+// L3 ingress from L2 (L2 hdr already chopped). `pkt` points at the
+// IP header; `pkt_size` includes the IP header + L3 payload.
+void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
+                                 char* pkt, size_t pkt_size,
+                                 int   l3_protocol_number);
+
+// Originate path: build an IP packet (src = node's loopback) from a
+// user payload and feed it into the same forwarding pipeline as if
+// it had arrived from L2. `dest_ip_address` is in host byte order
+// (the same convention LPM uses). Used by the `ping` CLI.
+void demote_packet_to_layer3(Node* node, char* pkt, size_t pkt_size,
+                             int protocol_number, unsigned int dest_ip_address);
+
 #endif

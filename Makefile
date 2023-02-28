@@ -54,7 +54,7 @@ build/Layer2/l2switch.o: Layer2/l2switch.c Layer2/layer2.h graph.h net.h utils.h
 	@mkdir -p build/Layer2
 	$(CC) $(CFLAGS) -c Layer2/l2switch.c -o build/Layer2/l2switch.o
 
-build/Layer3/layer3.o: Layer3/layer3.c Layer3/layer3.h graph.h net.h utils.h
+build/Layer3/layer3.o: Layer3/layer3.c Layer3/layer3.h graph.h net.h utils.h comm.h Layer2/layer2.h
 	@mkdir -p build/Layer3
 	$(CC) $(CFLAGS) -c Layer3/layer3.c -o build/Layer3/layer3.o
 
