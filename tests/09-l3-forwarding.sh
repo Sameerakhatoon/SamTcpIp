@@ -19,7 +19,7 @@ out_ping="$(printf 'run node R0_re resolve-arp 20.1.1.2\nrun node R0_re ping 20.
 # - LPM hit the direct route
 # - is_layer3_local_delivery returned true
 # - promote_pkt_to_layer4 dispatched to the registered handler
-assert_contains "$out_ping" "Ping recv : R1_re : REQ" "L4 dispatch on R1_re"
+assert_contains "$out_ping" "Ping recv : R1_re : ICMP echo request" "L4 dispatch on R1_re"
 
 # 3. ARP-miss path: ping without pre-resolving.
 out_miss="$(printf 'run node R0_re ping 20.1.1.2\nquit\n' | ./testapp)"

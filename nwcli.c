@@ -21,6 +21,7 @@ static int   show_node_route_handler(int argc, char** argv);
 static int   run_send_handler(int argc, char** argv);
 static int   run_node_resolve_arp_handler(int argc, char** argv);
 static int   run_node_ping_handler(int argc, char** argv);
+static int   run_node_ping_bad_handler(int argc, char** argv);
 static int   config_l2mode_handler(int argc, char** argv);
 static int   config_route_handler(int argc, char** argv);
 void         nwcli_install(Graph* topo);
@@ -216,6 +217,33 @@ static int run_node_ping_handler(int argc, char** argv){
     return 0;
 }
 
+// ch11: `run node <node> ping-bad <ip>` - fixture for the
+// receiver's RFC 1071 verify path.
+//
+// Fires three valid pings first so ARP settles + the receiver
+// definitely handles ECHO REQUEST correctly, then ONE corrupted
+// ping (XORs a bit of the checksum after compute). The receiver
+// MUST drop the corrupted one with "ICMP checksum invalid".
+static int run_node_ping_bad_handler(int argc, char** argv){
+    if(argc != 2){
+        fprintf(stderr, "run node ping-bad: expected <node> <ip>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    for(short seq = 1; seq <= 3; seq++){
+        ping_send_request(node, argv[1], seq);
+        usleep(200 * 1000);
+    }
+    // One bad-checksum ping. Receiver MUST drop.
+    ping_send_request_bad_checksum(node, argv[1], 99);
+    usleep(200 * 1000);
+    return 0;
+}
+
 // ---- command tree --------------------------------------------------------
 // Children arrays are NULL-terminated. Built bottom-up so each
 // parent's child pointer table is in scope.
@@ -339,9 +367,24 @@ static CliCmd cmd_run_node_ping = {
     .children = run_node_ping_ip_children,
 };
 
+// ch11: run node <name> ping-bad <ip>
+static CliCmd cmd_run_node_ping_bad_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .handler  = run_node_ping_bad_handler,
+    .help     = "destination IP; 3 valid pings then 1 with corrupted ICMP csum",
+};
+static CliCmd* run_node_ping_bad_ip_children[] = { &cmd_run_node_ping_bad_ip, 0 };
+static CliCmd cmd_run_node_ping_bad = {
+    .name     = "ping-bad",
+    .help     = "ch11 fixture: 3 valid pings + 1 with bad ICMP checksum",
+    .children = run_node_ping_bad_ip_children,
+};
+
 static CliCmd* run_node_name_children[] = {
     &cmd_run_node_resolve,
     &cmd_run_node_ping,
+    &cmd_run_node_ping_bad,
     0,
 };
 

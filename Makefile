@@ -10,6 +10,7 @@ OBJECTS  = build/graph.o \
            build/Layer2/layer2.o \
            build/Layer2/l2switch.o \
            build/Layer3/layer3.o \
+           build/Layer3/icmp.o \
            build/Layer5/ping.o \
            build/topologies.o \
            build/gluethread/glthread.o
@@ -59,7 +60,11 @@ build/Layer3/layer3.o: Layer3/layer3.c Layer3/layer3.h graph.h net.h utils.h com
 	@mkdir -p build/Layer3
 	$(CC) $(CFLAGS) -c Layer3/layer3.c -o build/Layer3/layer3.o
 
-build/Layer5/ping.o: Layer5/ping.c Layer5/ping.h Layer3/layer3.h graph.h net.h
+build/Layer3/icmp.o: Layer3/icmp.c Layer3/icmp.h
+	@mkdir -p build/Layer3
+	$(CC) $(CFLAGS) -c Layer3/icmp.c -o build/Layer3/icmp.o
+
+build/Layer5/ping.o: Layer5/ping.c Layer5/ping.h Layer3/layer3.h Layer3/icmp.h graph.h net.h
 	@mkdir -p build/Layer5
 	$(CC) $(CFLAGS) -c Layer5/ping.c -o build/Layer5/ping.o
 
