@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <assert.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,19 @@
 #include "../utils.h"
 #include "../Layer2/layer2.h"
 #include "layer3.h"
+
+// ch12: pin the IPv4 header at exactly 20 bytes (RFC 791).
+// If a future edit reintroduces a `short` where a `char` is
+// required (or vice versa), the build fails loudly here.
+_Static_assert(sizeof(IpHdr) == 20, "RFC 791 IPv4 header must be 20 bytes");
+
+// ch12 test hook: when true, the next demote_packet_to_layer3
+// call XORs one bit of the computed IP checksum before storing
+// it. The receiver's verify path MUST drop the packet.
+static bool g_force_ip_csum_corrupt = false;
+void l3_test_force_ip_csum_corruption(bool on){
+    g_force_ip_csum_corrupt = on;
+}
 
 // Forward declarations.
 static bool _rt_table_entry_add(RtTable* rt_table, L3Route* l3_route);
@@ -310,6 +324,21 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
 
     IpHdr* ip_hdr = (IpHdr*)pkt;
 
+    // ch12: verify the IP header checksum. RFC 1071 self-consistency:
+    // running the algorithm over the whole header (including the
+    // stored checksum field) yields 0 on a valid header. ihl*4 is
+    // now 20 == sizeof(IpHdr); use ihl*4 to be option-tolerant if a
+    // future chapter adds IP options.
+    size_t hdr_size = ip_hdr->ihl * 4u;
+    if(hdr_size < 20 || hdr_size > pkt_size){
+        printf("L3 drop : %s : bad ihl=%u\n", node->node_name, ip_hdr->ihl);
+        return;
+    }
+    if(inet_checksum(ip_hdr, hdr_size) != 0){
+        printf("L3 drop : %s : IP checksum invalid\n", node->node_name);
+        return;
+    }
+
     L3Route* route = l3rib_lookup_lpm(NODE_RT_TABLE(node), ip_hdr->dst_ip);
     if(!route){
         printf("L3 drop : %s : no route for dst\n", node->node_name);
@@ -317,12 +346,12 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
     }
 
     if(l3_is_direct_route(route)){
-        // case 1: addressed to self -> local delivery. Use sizeof
-         // (IpHdr) rather than ihl*4 because our struct packs to 22
-         // bytes (short ttl/protocol/checksum); originate path agrees.
+        // case 1: addressed to self -> local delivery. ch12: chop at
+        // ihl*4 (now equal to sizeof(IpHdr) = 20) per the real wire
+        // format.
         if(is_layer3_local_delivery(node, ip_hdr->dst_ip)){
-            char*  l4_hdr  = (char*)ip_hdr + sizeof(IpHdr);
-            size_t l4_size = ip_hdr->total_length - sizeof(IpHdr);
+            char*  l4_hdr  = (char*)ip_hdr + hdr_size;
+            size_t l4_size = ip_hdr->total_length - hdr_size;
             promote_pkt_to_layer4(node, iif, ip_hdr, l4_hdr, l4_size, ip_hdr->protocol);
             return;
         }
@@ -340,6 +369,12 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
         printf("L3 drop : %s : TTL expired\n", node->node_name);
         return;
     }
+    // ch12: TTL is part of the checksummed area, so we must
+    // recompute. Simplest: zero and run inet_checksum again, store
+    // back in NBO. RFC 1141's incremental-update trick is an
+    // optimisation we skip.
+    ip_hdr->checksum = 0;
+    ip_hdr->checksum = htons(inet_checksum(ip_hdr, hdr_size));
 
     unsigned int next_hop_ip = 0;
     inet_pton(AF_INET, route->gw_ip, &next_hop_ip);
@@ -362,17 +397,15 @@ void demote_packet_to_layer3(Node* node, char* pkt, size_t pkt_size,
         printf("L3 originate drop : %s : payload too big\n", node->node_name);
         return;
     }
-    // Our IpHdr packs out to 22 bytes (ttl/protocol/checksum are
-     // `short` not `char`), so the L3 payload starts at sizeof(IpHdr)
-     // - not at ihl*4 = 20. Using ihl*4 would overrun dst_ip. Take
-     // the bigger of the two so receivers that chop at ihl*4 still
-     // see correct header fields.
+    // ch12: IpHdr is now exactly 20 bytes (RFC 791) so
+    // sizeof(IpHdr) == ihl*4. The L3 payload starts immediately
+    // after the header.
     char   buf[256] = {0};
     IpHdr* ip = (IpHdr*)buf;
     initialize_ip_hdr(ip);
-    ip->protocol     = protocol_number;
+    ip->protocol     = (unsigned char)protocol_number;
     size_t hdr_bytes = sizeof(IpHdr);
-    ip->total_length = (short)(hdr_bytes + pkt_size);
+    ip->total_length = (unsigned short)(hdr_bytes + pkt_size);
     ip->dst_ip       = dest_ip_address;
 
     memcpy(buf + hdr_bytes, pkt, pkt_size);
@@ -407,6 +440,16 @@ void demote_packet_to_layer3(Node* node, char* pkt, size_t pkt_size,
         unsigned int lb_net = 0;
         inet_pton(AF_INET, NODE_LO_ADDR(node), &lb_net);
         ip->src_ip = htonl(lb_net);
+    }
+
+    // ch12: compute the IP header checksum AFTER all header
+    // fields are final. Stored in NBO so the wire bytes are
+    // deterministic and the receiver's big-endian read yields 0.
+    ip->checksum = 0;
+    ip->checksum = htons(inet_checksum(ip, hdr_bytes));
+    if(g_force_ip_csum_corrupt){
+        // Test hook: flip a bit. Receiver MUST drop.
+        ip->checksum ^= htons(0x0001);
     }
 
     if(l3_is_direct_route(route)){

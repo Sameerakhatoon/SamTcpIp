@@ -21,24 +21,34 @@
 
 #pragma pack(push, 1)
 
+// ch12: real RFC 791 IPv4 header. The course shipped this as
+// 22 bytes (ttl / protocol / checksum were `short`); ch12 fixes
+// to exactly 20 bytes so `ihl * 4 == sizeof(IpHdr)` holds and
+// the offsets match the wire format. A static_assert in
+// layer3.c pins this.
+//
+// Byte-order convention: multi-byte fields are in HOST byte
+// order on our simulated wire, preserved from the course. Real
+// RFC 791 uses network byte order. PLAN.md rule 3 says we close
+// this at the TAP boundary in Milestone 1 ch18.
 typedef struct IpHdr {
-    unsigned int version    : 4;    // 4 for IPv4
-    unsigned int ihl        : 4;    // 32-bit words; we use 5 (= 20 bytes)
-    char         not_used;
-    short        total_length;      // hdr + payload
+    unsigned int   version    : 4;   // 4 for IPv4
+    unsigned int   ihl        : 4;   // 32-bit words; 5 (= 20 bytes)
+    unsigned char  tos;              // type of service; left zero
+    unsigned short total_length;     // hdr + payload
 
     // Fragmentation members we never set / consult.
-    short        identification;
-    unsigned int unused_flag : 1;
-    unsigned int DF_flag     : 1;
-    unsigned int MORE_flag   : 1;
-    unsigned int frag_offset : 13;
+    unsigned short identification;
+    unsigned int   unused_flag : 1;
+    unsigned int   DF_flag     : 1;
+    unsigned int   MORE_flag   : 1;
+    unsigned int   frag_offset : 13;
 
-    short        ttl;
-    short        protocol;
-    short        checksum;          // never computed; left zero
-    unsigned int src_ip;            // wire byte-order convention (see ch5/8)
-    unsigned int dst_ip;
+    unsigned char  ttl;              // hop limit (decremented on forward)
+    unsigned char  protocol;         // IANA: 1=ICMP
+    unsigned short checksum;         // RFC 1071 over the 20-byte header
+    unsigned int   src_ip;
+    unsigned int   dst_ip;
 } IpHdr;
 
 #pragma pack(pop)
@@ -46,7 +56,7 @@ typedef struct IpHdr {
 static inline void initialize_ip_hdr(IpHdr* h){
     h->version        = 4;
     h->ihl            = 5;
-    h->not_used       = 0;
+    h->tos            = 0;
     h->total_length   = 0;
     h->identification = 0;
     h->unused_flag    = 0;
@@ -59,6 +69,12 @@ static inline void initialize_ip_hdr(IpHdr* h){
     h->src_ip         = 0;
     h->dst_ip         = 0;
 }
+
+// ch12 test hook: toggles intentional IP-checksum corruption on
+// originate. Production code never calls this. tests/12-real-ip.sh
+// uses it via the `run node X ping-bad-ip <ip>` CLI to validate
+// that the receiver's verify path actually drops bad IP headers.
+void l3_test_force_ip_csum_corruption(bool on);
 
 // ---- Routing table -------------------------------------------------------
 

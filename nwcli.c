@@ -22,6 +22,7 @@ static int   run_send_handler(int argc, char** argv);
 static int   run_node_resolve_arp_handler(int argc, char** argv);
 static int   run_node_ping_handler(int argc, char** argv);
 static int   run_node_ping_bad_handler(int argc, char** argv);
+static int   run_node_ping_bad_ip_handler(int argc, char** argv);
 static int   config_l2mode_handler(int argc, char** argv);
 static int   config_route_handler(int argc, char** argv);
 void         nwcli_install(Graph* topo);
@@ -244,6 +245,31 @@ static int run_node_ping_bad_handler(int argc, char** argv){
     return 0;
 }
 
+// ch12: `run node <node> ping-bad-ip <ip>` - flips an IP-header
+// bit on originate so the receiver's IP-csum verify drops the
+// packet. Three valid pings first to settle ARP both directions,
+// then enable the hook, fire one more ping, disable the hook.
+static int run_node_ping_bad_ip_handler(int argc, char** argv){
+    if(argc != 2){
+        fprintf(stderr, "run node ping-bad-ip: expected <node> <ip>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    for(short seq = 1; seq <= 3; seq++){
+        ping_send_request(node, argv[1], seq);
+        usleep(200 * 1000);
+    }
+    l3_test_force_ip_csum_corruption(true);
+    ping_send_request(node, argv[1], 88);
+    usleep(200 * 1000);
+    l3_test_force_ip_csum_corruption(false);
+    return 0;
+}
+
 // ---- command tree --------------------------------------------------------
 // Children arrays are NULL-terminated. Built bottom-up so each
 // parent's child pointer table is in scope.
@@ -381,10 +407,25 @@ static CliCmd cmd_run_node_ping_bad = {
     .children = run_node_ping_bad_ip_children,
 };
 
+// ch12: run node <name> ping-bad-ip <ip>
+static CliCmd cmd_run_node_ping_bad_ip2_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .handler  = run_node_ping_bad_ip_handler,
+    .help     = "destination IP; 3 valid pings then 1 with corrupted IP csum",
+};
+static CliCmd* run_node_ping_bad_ip2_ip_children[] = { &cmd_run_node_ping_bad_ip2_ip, 0 };
+static CliCmd cmd_run_node_ping_bad_ip2 = {
+    .name     = "ping-bad-ip",
+    .help     = "ch12 fixture: 3 valid pings + 1 with bad IP checksum",
+    .children = run_node_ping_bad_ip2_ip_children,
+};
+
 static CliCmd* run_node_name_children[] = {
     &cmd_run_node_resolve,
     &cmd_run_node_ping,
     &cmd_run_node_ping_bad,
+    &cmd_run_node_ping_bad_ip2,
     0,
 };
 
