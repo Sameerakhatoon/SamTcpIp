@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include "Layer2/layer2.h"
 #include "Layer3/layer3.h"
+#include "Layer4/udp.h"
 #include "Layer5/ping.h"
 #include "cli.h"
 #include "comm.h"
@@ -23,6 +24,8 @@ static int   run_node_resolve_arp_handler(int argc, char** argv);
 static int   run_node_ping_handler(int argc, char** argv);
 static int   run_node_ping_bad_handler(int argc, char** argv);
 static int   run_node_ping_bad_ip_handler(int argc, char** argv);
+static int   run_node_udp_handler(int argc, char** argv);
+static int   run_node_udp_bad_csum_handler(int argc, char** argv);
 static int   config_l2mode_handler(int argc, char** argv);
 static int   config_route_handler(int argc, char** argv);
 void         nwcli_install(Graph* topo);
@@ -270,6 +273,76 @@ static int run_node_ping_bad_ip_handler(int argc, char** argv){
     return 0;
 }
 
+// ch13: `run node <node> udp <ip>` - send a UDP datagram with a
+// fixed greeting payload to <ip>:7 (echo port). The receiver
+// echoes back to the source port - we use UDP_PRINTER_PORT
+// (12345) as src so the reply lands on the printer handler and
+// produces a deterministic log line.
+//
+// Three sends with sleeps for the same ARP-warmup reason ping
+// uses three (ARP-miss on first attempt seeds the cache; second
+// and third round-trip).
+static int run_node_udp_handler(int argc, char** argv){
+    if(argc != 2){
+        fprintf(stderr, "run node udp: expected <node> <ip>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    unsigned int dst_net = 0;
+    if(inet_pton(AF_INET, argv[1], &dst_net) != 1){
+        fprintf(stderr, "udp: bad ip `%s`\n", argv[1]);
+        return 1;
+    }
+    unsigned int dst_host = htonl(dst_net);
+    const char* msg = "hello-from-samtcpip";
+    for(int i = 0; i < 3; i++){
+        udp_send_pkt(node, dst_host, UDP_PRINTER_PORT, UDP_ECHO_PORT,
+                     msg, strlen(msg));
+        usleep(200 * 1000);
+    }
+    return 0;
+}
+
+// ch13: `run node <node> udp-bad-csum <ip>`. Same flow as `udp`
+// but the test hook flips one bit of the UDP checksum on emit.
+// Receiver MUST drop with "UDP recv : ... checksum invalid".
+static int run_node_udp_bad_csum_handler(int argc, char** argv){
+    if(argc != 2){
+        fprintf(stderr, "run node udp-bad-csum: expected <node> <ip>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    unsigned int dst_net = 0;
+    if(inet_pton(AF_INET, argv[1], &dst_net) != 1){
+        fprintf(stderr, "udp-bad-csum: bad ip `%s`\n", argv[1]);
+        return 1;
+    }
+    unsigned int dst_host = htonl(dst_net);
+    const char* msg = "hello-from-samtcpip";
+
+    // 3 valid pings to settle ARP. (UDP-only flow would have to
+    // wait for ARP on the first packet; ping pre-warms.)
+    for(short seq = 1; seq <= 3; seq++){
+        ping_send_request(node, argv[1], seq);
+        usleep(200 * 1000);
+    }
+    // 1 corrupted UDP send.
+    udp_test_force_csum_corruption(true);
+    udp_send_pkt(node, dst_host, UDP_PRINTER_PORT, UDP_ECHO_PORT,
+                 msg, strlen(msg));
+    usleep(200 * 1000);
+    udp_test_force_csum_corruption(false);
+    return 0;
+}
+
 // ---- command tree --------------------------------------------------------
 // Children arrays are NULL-terminated. Built bottom-up so each
 // parent's child pointer table is in scope.
@@ -421,11 +494,41 @@ static CliCmd cmd_run_node_ping_bad_ip2 = {
     .children = run_node_ping_bad_ip2_ip_children,
 };
 
+// ch13: run node <name> udp <ip>
+static CliCmd cmd_run_node_udp_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .handler  = run_node_udp_handler,
+    .help     = "destination IP; sends UDP greeting to port 7 (echo)",
+};
+static CliCmd* run_node_udp_ip_children[] = { &cmd_run_node_udp_ip, 0 };
+static CliCmd cmd_run_node_udp = {
+    .name     = "udp",
+    .help     = "originate a UDP datagram with greeting payload",
+    .children = run_node_udp_ip_children,
+};
+
+// ch13: run node <name> udp-bad-csum <ip>
+static CliCmd cmd_run_node_udp_bad_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .handler  = run_node_udp_bad_csum_handler,
+    .help     = "destination IP; 3 valid pings then 1 UDP with bad checksum",
+};
+static CliCmd* run_node_udp_bad_ip_children[] = { &cmd_run_node_udp_bad_ip, 0 };
+static CliCmd cmd_run_node_udp_bad = {
+    .name     = "udp-bad-csum",
+    .help     = "ch13 fixture: 3 valid pings + 1 UDP with bad checksum",
+    .children = run_node_udp_bad_ip_children,
+};
+
 static CliCmd* run_node_name_children[] = {
     &cmd_run_node_resolve,
     &cmd_run_node_ping,
     &cmd_run_node_ping_bad,
     &cmd_run_node_ping_bad_ip2,
+    &cmd_run_node_udp,
+    &cmd_run_node_udp_bad,
     0,
 };
 
@@ -571,6 +674,8 @@ void nwcli_install(Graph* topo){
     g_topo = topo;
     cli_set_root(&cmd_root);
     ping_register();
+    udp_register();
+    udp_install_default_handlers(topo);
     network_start_pkt_receiver_thread(topo);
     usleep(50 * 1000);
 }
