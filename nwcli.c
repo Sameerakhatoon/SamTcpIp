@@ -7,6 +7,7 @@
 #include "Layer3/layer3.h"
 #include "Layer4/udp.h"
 #include "Layer5/ping.h"
+#include "tap.h"
 #include "cli.h"
 #include "comm.h"
 #include "graph.h"
@@ -26,6 +27,8 @@ static int   run_node_ping_bad_handler(int argc, char** argv);
 static int   run_node_ping_bad_ip_handler(int argc, char** argv);
 static int   run_node_udp_handler(int argc, char** argv);
 static int   run_node_udp_bad_csum_handler(int argc, char** argv);
+static int   run_tap_open_handler(int argc, char** argv);
+static int   run_tap_close_handler(int argc, char** argv);
 static int   config_l2mode_handler(int argc, char** argv);
 static int   config_route_handler(int argc, char** argv);
 void         nwcli_install(Graph* topo);
@@ -343,6 +346,37 @@ static int run_node_udp_bad_csum_handler(int argc, char** argv){
     return 0;
 }
 
+// ch14: `run tap open <name>` - opens /dev/net/tun with
+// IFF_TAP | IFF_NO_PI and stashes the fd globally. Calling twice
+// without close leaks the previous fd; that's an operator error
+// the simulator doesn't try to recover from.
+static int g_tap_fd = -1;
+static int run_tap_open_handler(int argc, char** argv){
+    if(argc != 1){
+        fprintf(stderr, "run tap open: expected <ifname>\n");
+        return 1;
+    }
+    if(g_tap_fd >= 0){
+        fprintf(stderr, "run tap open: a TAP fd is already open (close first)\n");
+        return 1;
+    }
+    g_tap_fd = tap_open(argv[0]);
+    if(g_tap_fd < 0){
+        // tap_open already printed a diagnostic.
+        return 1;
+    }
+    return 0;
+}
+
+// ch14: `run tap close` - closes the stashed fd. No-op if -1.
+static int run_tap_close_handler(int argc, char** argv){
+    (void)argc; (void)argv;
+    tap_close(g_tap_fd);
+    g_tap_fd = -1;
+    printf("TAP closed\n");
+    return 0;
+}
+
 // ---- command tree --------------------------------------------------------
 // Children arrays are NULL-terminated. Built bottom-up so each
 // parent's child pointer table is in scope.
@@ -546,9 +580,41 @@ static CliCmd cmd_run_node = {
     .children = run_node_children,
 };
 
+// ch14: run tap open <ifname> / run tap close
+static CliCmd cmd_run_tap_open_ifname = {
+    .name     = "<ifname>",
+    .capture  = true,
+    .handler  = run_tap_open_handler,
+    .help     = "TAP interface name (e.g. samtap0); empty -> kernel allocates",
+};
+static CliCmd* run_tap_open_ifname_children[] = { &cmd_run_tap_open_ifname, 0 };
+static CliCmd cmd_run_tap_open = {
+    .name     = "open",
+    .help     = "open a TAP interface (needs CAP_NET_ADMIN)",
+    .children = run_tap_open_ifname_children,
+};
+
+static CliCmd cmd_run_tap_close = {
+    .name     = "close",
+    .handler  = run_tap_close_handler,
+    .help     = "close the stashed TAP fd",
+};
+
+static CliCmd* run_tap_children[] = {
+    &cmd_run_tap_open,
+    &cmd_run_tap_close,
+    0,
+};
+static CliCmd cmd_run_tap = {
+    .name     = "tap",
+    .help     = "TAP device primitives (ch14)",
+    .children = run_tap_children,
+};
+
 static CliCmd* run_children[] = {
     &cmd_run_send,
     &cmd_run_node,
+    &cmd_run_tap,
     0,
 };
 

@@ -13,6 +13,7 @@ OBJECTS  = build/graph.o \
            build/Layer3/icmp.o \
            build/Layer4/udp.o \
            build/Layer5/ping.o \
+           build/tap.o \
            build/topologies.o \
            build/gluethread/glthread.o
 
@@ -37,7 +38,7 @@ build/cli.o: cli.c cli.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c cli.c -o build/cli.o
 
-build/nwcli.o: nwcli.c nwcli.h cli.h graph.h net.h comm.h Layer2/layer2.h Layer3/layer3.h Layer4/udp.h Layer5/ping.h
+build/nwcli.o: nwcli.c nwcli.h cli.h graph.h net.h comm.h Layer2/layer2.h Layer3/layer3.h Layer4/udp.h Layer5/ping.h tap.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c nwcli.c -o build/nwcli.o
 
@@ -68,6 +69,10 @@ build/Layer3/icmp.o: Layer3/icmp.c Layer3/icmp.h utils.h
 build/Layer4/udp.o: Layer4/udp.c Layer4/udp.h Layer3/layer3.h graph.h net.h utils.h gluethread/glthread.h
 	@mkdir -p build/Layer4
 	$(CC) $(CFLAGS) -c Layer4/udp.c -o build/Layer4/udp.o
+
+build/tap.o: tap.c tap.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -c tap.c -o build/tap.o
 
 build/Layer5/ping.o: Layer5/ping.c Layer5/ping.h Layer3/layer3.h Layer3/icmp.h graph.h net.h
 	@mkdir -p build/Layer5
