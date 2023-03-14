@@ -29,6 +29,8 @@ static int   run_node_udp_handler(int argc, char** argv);
 static int   run_node_udp_bad_csum_handler(int argc, char** argv);
 static int   run_tap_open_handler(int argc, char** argv);
 static int   run_tap_close_handler(int argc, char** argv);
+static int   run_tap_attach_handler(int argc, char** argv);
+static int   run_tap_detach_handler(int argc, char** argv);
 static int   config_l2mode_handler(int argc, char** argv);
 static int   config_route_handler(int argc, char** argv);
 void         nwcli_install(Graph* topo);
@@ -377,6 +379,34 @@ static int run_tap_close_handler(int argc, char** argv){
     return 0;
 }
 
+// ch15: `run tap attach <node> <ifname> <iif>` - opens the TAP
+// AND spawns the recv thread bound to (node, iif). Frames coming
+// out of the kernel's TAP-other-end get fed straight into
+// pkt_receive as if they had arrived on `iif`.
+static int run_tap_attach_handler(int argc, char** argv){
+    if(argc != 3){
+        fprintf(stderr, "run tap attach: expected <node> <ifname> <iif>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    if(tap_attach(node, argv[1], argv[2]) < 0){
+        // tap_attach already printed the diagnostic.
+        return 1;
+    }
+    return 0;
+}
+
+// ch15: `run tap detach` - stops the recv thread, closes the fd.
+static int run_tap_detach_handler(int argc, char** argv){
+    (void)argc; (void)argv;
+    tap_detach();
+    return 0;
+}
+
 // ---- command tree --------------------------------------------------------
 // Children arrays are NULL-terminated. Built bottom-up so each
 // parent's child pointer table is in scope.
@@ -600,9 +630,45 @@ static CliCmd cmd_run_tap_close = {
     .help     = "close the stashed TAP fd",
 };
 
+// ch15: run tap attach <node> <ifname> <iif>
+static CliCmd cmd_run_tap_attach_iif = {
+    .name     = "<iif>",
+    .capture  = true,
+    .handler  = run_tap_attach_handler,
+    .help     = "interface name on <node> the TAP plays the role of (e.g. eth0/0)",
+};
+static CliCmd* run_tap_attach_iif_children[] = { &cmd_run_tap_attach_iif, 0 };
+static CliCmd cmd_run_tap_attach_ifname = {
+    .name     = "<ifname>",
+    .capture  = true,
+    .help     = "TAP interface name (kernel-side, e.g. samtap0)",
+    .children = run_tap_attach_iif_children,
+};
+static CliCmd* run_tap_attach_ifname_children[] = { &cmd_run_tap_attach_ifname, 0 };
+static CliCmd cmd_run_tap_attach_node = {
+    .name     = "<node>",
+    .capture  = true,
+    .help     = "Node to bind TAP to (the userspace stack's home)",
+    .children = run_tap_attach_ifname_children,
+};
+static CliCmd* run_tap_attach_node_children[] = { &cmd_run_tap_attach_node, 0 };
+static CliCmd cmd_run_tap_attach = {
+    .name     = "attach",
+    .help     = "open TAP + spawn recv thread bound to (node, iif)",
+    .children = run_tap_attach_node_children,
+};
+
+static CliCmd cmd_run_tap_detach = {
+    .name     = "detach",
+    .handler  = run_tap_detach_handler,
+    .help     = "stop the recv thread + close the TAP fd",
+};
+
 static CliCmd* run_tap_children[] = {
     &cmd_run_tap_open,
     &cmd_run_tap_close,
+    &cmd_run_tap_attach,
+    &cmd_run_tap_detach,
     0,
 };
 static CliCmd cmd_run_tap = {

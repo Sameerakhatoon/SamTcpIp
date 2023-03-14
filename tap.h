@@ -49,4 +49,32 @@ long tap_send_raw(int fd, const void* buf, size_t len);
 // requests after `ip link set up dev samtap0`) appear here.
 long tap_recv_raw(int fd, void* buf, size_t max);
 
+// ch15: attach a TAP interface to a (node, iif) pair.
+//
+// Opens the TAP via tap_open, looks up `iif_name` on `node`, then
+// spawns a background recv thread that loops on tap_recv_raw and
+// calls pkt_receive(node, iif, buf, n) for every frame. The
+// thread runs until tap_detach() is called.
+//
+// `node` is the Node the userspace stack runs as (Phase 6+
+// reduces this to "the one Node" per PLAN.md rule 4; ch15 keeps
+// the parameter for symmetry with the simulator).
+//
+// Returns 0 on success, -1 on error (already attached, bad
+// args, tap_open failed, no such interface).
+//
+// Idempotent on detach-then-reattach; calling attach twice
+// without detach is rejected.
+struct Node;
+struct Interface;
+int  tap_attach(struct Node* node, const char* ifname, const char* iif_name);
+
+// ch15: stop the recv thread, close the TAP fd. Safe to call
+// from any thread. No-op if not attached.
+void tap_detach(void);
+
+// ch15: tap_attach prints "TAP attach : ..."; tap_detach prints
+// "TAP detach". The recv thread prints "TAP recv : N bytes on
+// <node>/<iif>" for every frame, then dispatches to pkt_receive.
+
 #endif

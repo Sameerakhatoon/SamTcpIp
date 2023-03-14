@@ -70,7 +70,7 @@ build/Layer4/udp.o: Layer4/udp.c Layer4/udp.h Layer3/layer3.h graph.h net.h util
 	@mkdir -p build/Layer4
 	$(CC) $(CFLAGS) -c Layer4/udp.c -o build/Layer4/udp.o
 
-build/tap.o: tap.c tap.h
+build/tap.o: tap.c tap.h comm.h graph.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c tap.c -o build/tap.o
 
