@@ -42,7 +42,7 @@ build/nwcli.o: nwcli.c nwcli.h cli.h graph.h net.h comm.h Layer2/layer2.h Layer3
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c nwcli.c -o build/nwcli.o
 
-build/comm.o: comm.c comm.h graph.h
+build/comm.o: comm.c comm.h graph.h tap.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c comm.c -o build/comm.o
 

@@ -20,6 +20,7 @@
 //     that diagnostic and skips the success path; sudo runs see
 //     the success path.
 
+#include <stdbool.h>
 #include <stddef.h>
 
 // Linux IFNAMSIZ is 16; mirror it here so callers don't have to
@@ -76,5 +77,15 @@ void tap_detach(void);
 // ch15: tap_attach prints "TAP attach : ..."; tap_detach prints
 // "TAP detach". The recv thread prints "TAP recv : N bytes on
 // <node>/<iif>" for every frame, then dispatches to pkt_receive.
+
+// ch16: send-side integration. comm.c::send_pkt_out asks
+// `tap_is_attached_iif` whether the outbound oif corresponds to
+// the TAP-attached interface; if yes, `tap_write_frame` is called
+// instead of going through the UDP-loopback simulator wire.
+//
+// Both helpers are no-ops + return safe defaults when no TAP is
+// attached, so callers don't need a separate guard.
+bool tap_is_attached_iif(struct Interface* iif);
+long tap_write_frame(const void* buf, size_t len);
 
 #endif

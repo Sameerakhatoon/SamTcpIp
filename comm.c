@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include "comm.h"
 #include "graph.h"
+#include "tap.h"
 
 // Forward declarations.
 static unsigned int get_next_udp_port_number(void);
@@ -159,6 +160,14 @@ int send_pkt_out(char* pkt, size_t pkt_size, Interface* oif){
     int rc = -1;
     if(pkt_size + IF_NAME_SIZE > MAX_PACKET_BUFFER_SIZE){
         return -1;
+    }
+    // ch16: TAP egress. When the oif is the TAP-attached interface,
+    // the wire is the kernel's TAP device, not the simulator's UDP
+    // loopback. We write the raw frame directly; no peer-side aux
+    // header (TAP has IFF_NO_PI set).
+    if(tap_is_attached_iif(oif)){
+        long n = tap_write_frame(pkt, pkt_size);
+        return n > 0 ? 0 : -1;
     }
     Node* nbr_node = get_nbr_node(oif);
     if(!nbr_node){

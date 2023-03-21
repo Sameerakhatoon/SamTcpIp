@@ -21,6 +21,8 @@ long  tap_send_raw(int fd, const void* buf, size_t len);
 long  tap_recv_raw(int fd, void* buf, size_t max);
 int   tap_attach(Node* node, const char* ifname, const char* iif_name);
 void  tap_detach(void);
+bool  tap_is_attached_iif(Interface* iif);
+long  tap_write_frame(const void* buf, size_t len);
 static void* tap_recv_thread(void* arg);
 
 int tap_open(const char* ifname){
@@ -172,6 +174,28 @@ int tap_attach(Node* node, const char* ifname, const char* iif_name){
     printf("TAP attach : %s -> %s/%s fd=%d\n",
            ifname, node->node_name, iif_name, fd);
     return 0;
+}
+
+// ch16: send-side integration.
+//
+// Both helpers tolerate "no TAP attached" by returning the
+// safe default - callers don't need to guard. This keeps the
+// integration point in comm.c::send_pkt_out small.
+
+bool tap_is_attached_iif(Interface* iif){
+    return iif != NULL && g_tap_iif == iif;
+}
+
+long tap_write_frame(const void* buf, size_t len){
+    if(g_tap_fd < 0){
+        return -1;
+    }
+    long n = tap_send_raw(g_tap_fd, buf, len);
+    if(n > 0){
+        printf("TAP send : %ld bytes via %s/%s\n",
+               n, g_tap_node->node_name, g_tap_iif->if_name);
+    }
+    return n;
 }
 
 void tap_detach(void){
