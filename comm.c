@@ -215,7 +215,38 @@ int send_pkt_flood(Node* node, Interface* exempted_intf, char* pkt, size_t pkt_s
     return rc;
 }
 
+// ch17: ingress lock.
+//
+// Two recv threads now feed pkt_receive: the UDP-loopback fan-in
+// (ch4) and the TAP recv thread (ch15). They can land on the same
+// Node concurrently. The L2 + L3 paths walk shared per-Node tables
+// (ARP cache, MAC table, RT table) that the course built without
+// any locking - because there was only one recv thread.
+//
+// Cheapest correct fix: a single recursive mutex around pkt_receive
+// entry. Recursive because the L2 ingress can synchronously call
+// send_pkt_out, which in turn may need state we want stable; we'd
+// rather not invent a per-table lock-order today. Single because
+// our throughput target is "manual ping", not millions of pps.
+//
+// PLAN.md rule 1: this is needed for curl-both-ways. Without it
+// the receive path races as soon as the TAP fires a frame while
+// the simulator wire is also delivering one. Documented in
+// docs/17-locking.md.
+static pthread_mutex_t       g_pkt_recv_mtx;
+static pthread_once_t        g_pkt_recv_mtx_once = PTHREAD_ONCE_INIT;
+static void init_pkt_recv_mtx(void){
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_pkt_recv_mtx, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
+
 int pkt_receive(Node* node, Interface* iif, char* pkt, size_t pkt_size){
+    pthread_once(&g_pkt_recv_mtx_once, init_pkt_recv_mtx);
+    pthread_mutex_lock(&g_pkt_recv_mtx);
     layer2_frame_recv(node, iif, pkt, pkt_size);
+    pthread_mutex_unlock(&g_pkt_recv_mtx);
     return 0;
 }
