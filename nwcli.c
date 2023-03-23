@@ -35,6 +35,7 @@ static int   run_tap_ifup_handler(int argc, char** argv);
 static int   run_tap_host_ip_handler(int argc, char** argv);
 static int   config_l2mode_handler(int argc, char** argv);
 static int   config_route_handler(int argc, char** argv);
+static int   config_intf_ip_handler(int argc, char** argv);
 void         nwcli_install(Graph* topo);
 
 // The CLI tree only ever needs a single Graph (the topology built at
@@ -136,6 +137,34 @@ static int config_route_handler(int argc, char** argv){
 // ch6: `config node <node> interface <if> l2mode <access|trunk>`.
 // Flips the interface to L2 mode and stashes its IP-config flag so
 // it can be brought back to L3 later.
+// ch19: `config node <node> interface <if> ip <ip> <mask>` -
+// reconfigure the simulator-side IP at runtime. The topology
+// builder sets initial IPs; ch19 lets us realign R0_re's eth0/0
+// with the host-side subnet that ch18's tap host-ip set up.
+static int config_intf_ip_handler(int argc, char** argv){
+    if(argc != 4){
+        fprintf(stderr, "config: expected <node> interface <if> ip <ip> <mask>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    int mask = atoi(argv[3]);
+    if(mask < 0 || mask > 32){
+        fprintf(stderr, "config interface ip: mask out of range\n");
+        return 1;
+    }
+    if(!node_set_intf_ip_address(node, argv[1], argv[2], (char)mask)){
+        fprintf(stderr, "config interface ip: set failed (no such intf? bad ip?)\n");
+        return 1;
+    }
+    printf("Intf ip : %s/%s set to %s/%d\n",
+           node->node_name, argv[1], argv[2], mask);
+    return 0;
+}
+
 static int config_l2mode_handler(int argc, char** argv){
     if(argc != 3){
         fprintf(stderr, "config: expected <node> <if> <access|trunk>\n");
@@ -776,7 +805,29 @@ static CliCmd cmd_config_l2mode = {
     .help     = "set L2 mode on the interface",
     .children = config_l2mode_val_children,
 };
-static CliCmd* config_if_name_children[] = { &cmd_config_l2mode, 0 };
+
+// ch19: config node <node> interface <if> ip <ip> <mask>
+static CliCmd cmd_config_intf_ip_mask = {
+    .name     = "<mask>",
+    .capture  = true,
+    .handler  = config_intf_ip_handler,
+    .help     = "netmask bits 0..32",
+};
+static CliCmd* config_intf_ip_mask_children[] = { &cmd_config_intf_ip_mask, 0 };
+static CliCmd cmd_config_intf_ip_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .help     = "dotted-quad IP",
+    .children = config_intf_ip_mask_children,
+};
+static CliCmd* config_intf_ip_ip_children[] = { &cmd_config_intf_ip_ip, 0 };
+static CliCmd cmd_config_intf_ip = {
+    .name     = "ip",
+    .help     = "set the interface IP at runtime",
+    .children = config_intf_ip_ip_children,
+};
+
+static CliCmd* config_if_name_children[] = { &cmd_config_l2mode, &cmd_config_intf_ip, 0 };
 
 static CliCmd cmd_config_if_name = {
     .name     = "<if-name>",
