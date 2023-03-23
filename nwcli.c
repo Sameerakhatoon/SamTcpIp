@@ -31,6 +31,8 @@ static int   run_tap_open_handler(int argc, char** argv);
 static int   run_tap_close_handler(int argc, char** argv);
 static int   run_tap_attach_handler(int argc, char** argv);
 static int   run_tap_detach_handler(int argc, char** argv);
+static int   run_tap_ifup_handler(int argc, char** argv);
+static int   run_tap_host_ip_handler(int argc, char** argv);
 static int   config_l2mode_handler(int argc, char** argv);
 static int   config_route_handler(int argc, char** argv);
 void         nwcli_install(Graph* topo);
@@ -407,6 +409,32 @@ static int run_tap_detach_handler(int argc, char** argv){
     return 0;
 }
 
+// ch18: `run tap ifup <ifname>` - flip IFF_UP on the kernel-side TAP.
+static int run_tap_ifup_handler(int argc, char** argv){
+    if(argc != 1){
+        fprintf(stderr, "run tap ifup: expected <ifname>\n");
+        return 1;
+    }
+    if(tap_ifup(argv[0]) < 0){
+        return 1;
+    }
+    return 0;
+}
+
+// ch18: `run tap host-ip <ifname> <ip> <mask-bits>` - assign the
+// kernel side of the TAP its IP, so the host can route to us.
+static int run_tap_host_ip_handler(int argc, char** argv){
+    if(argc != 3){
+        fprintf(stderr, "run tap host-ip: expected <ifname> <ip> <mask-bits>\n");
+        return 1;
+    }
+    int mask = atoi(argv[2]);
+    if(tap_set_host_ip(argv[0], argv[1], mask) < 0){
+        return 1;
+    }
+    return 0;
+}
+
 // ---- command tree --------------------------------------------------------
 // Children arrays are NULL-terminated. Built bottom-up so each
 // parent's child pointer table is in scope.
@@ -664,11 +692,55 @@ static CliCmd cmd_run_tap_detach = {
     .help     = "stop the recv thread + close the TAP fd",
 };
 
+// ch18: run tap ifup <ifname>
+static CliCmd cmd_run_tap_ifup_ifname = {
+    .name     = "<ifname>",
+    .capture  = true,
+    .handler  = run_tap_ifup_handler,
+    .help     = "TAP interface name to bring UP",
+};
+static CliCmd* run_tap_ifup_ifname_children[] = { &cmd_run_tap_ifup_ifname, 0 };
+static CliCmd cmd_run_tap_ifup = {
+    .name     = "ifup",
+    .help     = "set IFF_UP on the kernel-side TAP interface",
+    .children = run_tap_ifup_ifname_children,
+};
+
+// ch18: run tap host-ip <ifname> <ip> <mask-bits>
+static CliCmd cmd_run_tap_host_ip_mask = {
+    .name     = "<mask-bits>",
+    .capture  = true,
+    .handler  = run_tap_host_ip_handler,
+    .help     = "netmask in CIDR bits (0..32)",
+};
+static CliCmd* run_tap_host_ip_mask_children[] = { &cmd_run_tap_host_ip_mask, 0 };
+static CliCmd cmd_run_tap_host_ip_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .help     = "dotted-quad IP for the kernel-side TAP",
+    .children = run_tap_host_ip_mask_children,
+};
+static CliCmd* run_tap_host_ip_ip_children[] = { &cmd_run_tap_host_ip_ip, 0 };
+static CliCmd cmd_run_tap_host_ip_if = {
+    .name     = "<ifname>",
+    .capture  = true,
+    .help     = "TAP interface name",
+    .children = run_tap_host_ip_ip_children,
+};
+static CliCmd* run_tap_host_ip_if_children[] = { &cmd_run_tap_host_ip_if, 0 };
+static CliCmd cmd_run_tap_host_ip = {
+    .name     = "host-ip",
+    .help     = "assign IP/mask to kernel-side TAP (replaces sudo ip addr add)",
+    .children = run_tap_host_ip_if_children,
+};
+
 static CliCmd* run_tap_children[] = {
     &cmd_run_tap_open,
     &cmd_run_tap_close,
     &cmd_run_tap_attach,
     &cmd_run_tap_detach,
+    &cmd_run_tap_ifup,
+    &cmd_run_tap_host_ip,
     0,
 };
 static CliCmd cmd_run_tap = {

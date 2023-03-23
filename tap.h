@@ -88,4 +88,21 @@ void tap_detach(void);
 bool tap_is_attached_iif(struct Interface* iif);
 long tap_write_frame(const void* buf, size_t len);
 
+// ch18: bring the kernel-side TAP interface UP. The TUNSETIFF
+// ioctl from ch14 creates the interface; ch18 makes it actually
+// route packets.
+//
+// Returns 0 on success, -1 on error. Needs CAP_NET_ADMIN. Caller
+// supplies the interface name (must match what was passed to
+// tap_attach / tap_open).
+int tap_ifup(const char* ifname);
+
+// ch18: assign an IPv4 address + netmask to the kernel-side TAP.
+// Replaces the operator's manual `sudo ip addr add 10.0.0.99/24
+// dev samtap0` step. `mask_bits` is 0..32; the helper synthesises
+// the dotted-quad netmask internally.
+//
+// Returns 0 on success, -1 on error. Needs CAP_NET_ADMIN.
+int tap_set_host_ip(const char* ifname, const char* ip, int mask_bits);
+
 #endif

@@ -1,7 +1,9 @@
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stddef.h>
@@ -9,6 +11,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include "comm.h"
 #include "graph.h"
@@ -23,7 +26,10 @@ int   tap_attach(Node* node, const char* ifname, const char* iif_name);
 void  tap_detach(void);
 bool  tap_is_attached_iif(Interface* iif);
 long  tap_write_frame(const void* buf, size_t len);
+int   tap_ifup(const char* ifname);
+int   tap_set_host_ip(const char* ifname, const char* ip, int mask_bits);
 static void* tap_recv_thread(void* arg);
+static int   open_ioctl_socket(void);
 
 int tap_open(const char* ifname){
     int fd = open("/dev/net/tun", O_RDWR);
@@ -209,4 +215,98 @@ void tap_detach(void){
     g_tap_node = NULL;
     g_tap_iif  = NULL;
     printf("TAP detach\n");
+}
+
+// ---- ch18: kernel-side interface bring-up + IP assignment --------------
+
+// Helper: open a dummy AF_INET DGRAM socket. The ioctls
+// (SIOCSIFFLAGS, SIOCSIFADDR, SIOCSIFNETMASK) operate on the
+// kernel's interface table via ANY socket, not specifically the
+// TAP fd. Closing the dummy socket is fine; the ioctls have
+// already taken effect kernel-side.
+static int open_ioctl_socket(void){
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if(s < 0){
+        printf("TAP ifctl : socket() failed : %s (errno=%d)\n",
+               strerror(errno), errno);
+        return -1;
+    }
+    return s;
+}
+
+int tap_ifup(const char* ifname){
+    if(!ifname || !*ifname){
+        printf("TAP ifup : bad ifname\n");
+        return -1;
+    }
+    int s = open_ioctl_socket();
+    if(s < 0) return -1;
+
+    struct ifreq req;
+    memset(&req, 0, sizeof(req));
+    strncpy(req.ifr_name, ifname, IFNAMSIZ - 1);
+    req.ifr_name[IFNAMSIZ - 1] = '\0';
+
+    // Read flags first so we don't clobber unrelated bits.
+    if(ioctl(s, SIOCGIFFLAGS, &req) < 0){
+        printf("TAP ifup : SIOCGIFFLAGS failed : %s (errno=%d)\n",
+               strerror(errno), errno);
+        close(s);
+        return -1;
+    }
+    req.ifr_flags |= IFF_UP | IFF_RUNNING;
+    if(ioctl(s, SIOCSIFFLAGS, &req) < 0){
+        printf("TAP ifup : SIOCSIFFLAGS failed : %s (errno=%d)\n",
+               strerror(errno), errno);
+        close(s);
+        return -1;
+    }
+    close(s);
+    printf("TAP ifup : %s is UP\n", ifname);
+    return 0;
+}
+
+int tap_set_host_ip(const char* ifname, const char* ip, int mask_bits){
+    if(!ifname || !*ifname || !ip || mask_bits < 0 || mask_bits > 32){
+        printf("TAP host-ip : bad args\n");
+        return -1;
+    }
+    unsigned int ip_net = 0;
+    if(inet_pton(AF_INET, ip, &ip_net) != 1){
+        printf("TAP host-ip : bad ip `%s`\n", ip);
+        return -1;
+    }
+    int s = open_ioctl_socket();
+    if(s < 0) return -1;
+
+    struct ifreq req;
+    memset(&req, 0, sizeof(req));
+    strncpy(req.ifr_name, ifname, IFNAMSIZ - 1);
+    req.ifr_name[IFNAMSIZ - 1] = '\0';
+
+    // SIOCSIFADDR expects a sockaddr_in inside ifr_addr.
+    struct sockaddr_in* sin = (struct sockaddr_in*)&req.ifr_addr;
+    sin->sin_family = AF_INET;
+    sin->sin_addr.s_addr = ip_net;
+    if(ioctl(s, SIOCSIFADDR, &req) < 0){
+        printf("TAP host-ip : SIOCSIFADDR failed : %s (errno=%d)\n",
+               strerror(errno), errno);
+        close(s);
+        return -1;
+    }
+
+    // Compute the netmask as a contiguous high-bits-set value.
+    unsigned int mask_host = (mask_bits == 0) ? 0
+                          : (mask_bits == 32) ? 0xFFFFFFFFu
+                          : (0xFFFFFFFFu << (32 - mask_bits));
+    sin->sin_addr.s_addr = htonl(mask_host);
+    if(ioctl(s, SIOCSIFNETMASK, &req) < 0){
+        printf("TAP host-ip : SIOCSIFNETMASK failed : %s (errno=%d)\n",
+               strerror(errno), errno);
+        close(s);
+        return -1;
+    }
+    close(s);
+    printf("TAP host-ip : %s set to %s/%d\n", ifname, ip, mask_bits);
+    return 0;
 }
