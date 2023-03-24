@@ -16,6 +16,7 @@ static void process_arp_broadcast_request(Node* node, Interface* iif, EthernetHd
 static void process_arp_reply_msg(Node* node, Interface* iif, EthernetHdr* eth);
 void        layer2_frame_recv(Node* node, Interface* iif, char* pkt, size_t pkt_size);
 void        send_arp_broadcast_request(Node* node, Interface* oif, char* ip_addr);
+void        send_gratuitous_arp(Node* node, Interface* oif);
 void        init_arp_table(ArpTable** arp_table);
 ArpEntry*   arp_table_lookup(ArpTable* arp_table, char* ip_addr);
 void        clear_arp_table(ArpTable* arp_table);
@@ -164,6 +165,51 @@ void send_arp_broadcast_request(Node* node, Interface* oif, char* ip_addr){
     arp->dst_ip = htonl(arp->dst_ip);
 
     eth->FCS = 0;
+    send_pkt_out((char*)eth, sizeof(EthernetHdr) + sizeof(ArpHdr), oif);
+    free(eth);
+}
+
+// ch20: gratuitous ARP (RFC 5227 sec 2.3 announcement).
+//
+// An ARP REPLY whose src_ip equals dst_ip equals OUR IP and
+// whose target MAC is broadcast. Peers see a "free" reply and
+// learn (or refresh) our IP -> MAC mapping. The Linux kernel,
+// in particular, will populate its ARP cache for our IP before
+// any active resolution happens - useful when a host needs to
+// reach us soon after we configure our IP.
+//
+// Reuses arp_table_update_from_arp_reply on the peer side - no
+// new ingress dispatch needed.
+void send_gratuitous_arp(Node* node, Interface* oif){
+    if(!oif || !IS_INTF_L3_MODE(oif)){
+        printf("GARP : %s : oif has no L3 IP, skipping\n",
+               node ? node->node_name : "?");
+        return;
+    }
+    EthernetHdr* eth = calloc(1, sizeof(EthernetHdr));
+    if(!eth){
+        return;
+    }
+    layer2_fill_with_broadcast_mac((char*)eth->dst_mac.mac);
+    memcpy(eth->src_mac.mac, IF_MAC(oif), sizeof(MacAddr));
+    eth->type = ARP_MSG;
+
+    ArpHdr* arp = (ArpHdr*)eth->payload;
+    arp->hw_type        = 1;
+    arp->proto_type     = 0x0800;
+    arp->hw_addr_len    = sizeof(MacAddr);
+    arp->proto_addr_len = 4;
+    arp->op_code        = ARP_REPLY;
+    memcpy(arp->src_mac.mac, IF_MAC(oif), sizeof(MacAddr));
+    inet_pton(AF_INET, IF_IP(oif), &arp->src_ip);
+    arp->src_ip = htonl(arp->src_ip);
+    // RFC 5227: target MAC is broadcast; target IP equals our IP.
+    memset(arp->dst_mac.mac, 0xFF, sizeof(MacAddr));
+    arp->dst_ip = arp->src_ip;
+
+    eth->FCS = 0;
+    printf("GARP : %s : announcing %s on %s\n",
+           node->node_name, IF_IP(oif), oif->if_name);
     send_pkt_out((char*)eth, sizeof(EthernetHdr) + sizeof(ArpHdr), oif);
     free(eth);
 }

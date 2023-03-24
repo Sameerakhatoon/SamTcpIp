@@ -27,6 +27,7 @@ static int   run_node_ping_bad_handler(int argc, char** argv);
 static int   run_node_ping_bad_ip_handler(int argc, char** argv);
 static int   run_node_udp_handler(int argc, char** argv);
 static int   run_node_udp_bad_csum_handler(int argc, char** argv);
+static int   run_node_arp_announce_handler(int argc, char** argv);
 static int   run_tap_open_handler(int argc, char** argv);
 static int   run_tap_close_handler(int argc, char** argv);
 static int   run_tap_attach_handler(int argc, char** argv);
@@ -162,6 +163,13 @@ static int config_intf_ip_handler(int argc, char** argv){
     }
     printf("Intf ip : %s/%s set to %s/%d\n",
            node->node_name, argv[1], argv[2], mask);
+    // ch20: announce the new IP via GARP so peers (including the
+    // host kernel on the TAP side) update their ARP caches without
+    // waiting for an active resolution.
+    Interface* iface = get_node_if_by_name(node, argv[1]);
+    if(iface){
+        send_gratuitous_arp(node, iface);
+    }
     return 0;
 }
 
@@ -376,6 +384,31 @@ static int run_node_udp_bad_csum_handler(int argc, char** argv){
                  msg, strlen(msg));
     usleep(200 * 1000);
     udp_test_force_csum_corruption(false);
+    return 0;
+}
+
+// ch20: `run node <node> arp-announce` - broadcast a GARP on
+// every L3-mode interface. Used by tests + ops to refresh peer
+// caches without waiting for active resolution.
+static int run_node_arp_announce_handler(int argc, char** argv){
+    if(argc != 1){
+        fprintf(stderr, "run node arp-announce: expected <node>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    int sent = 0;
+    for(int i = 0; i < MAX_INTF_PER_NODE; i++){
+        Interface* iface = node->intf[i];
+        if(!iface) continue;
+        if(!IS_INTF_L3_MODE(iface)) continue;
+        send_gratuitous_arp(node, iface);
+        sent++;
+    }
+    printf("GARP : %s : announced on %d interface(s)\n", node->node_name, sent);
     return 0;
 }
 
@@ -643,6 +676,13 @@ static CliCmd cmd_run_node_udp_bad = {
     .children = run_node_udp_bad_ip_children,
 };
 
+// ch20: run node <name> arp-announce
+static CliCmd cmd_run_node_arp_announce = {
+    .name     = "arp-announce",
+    .handler  = run_node_arp_announce_handler,
+    .help     = "broadcast a GARP on every L3 interface of <node>",
+};
+
 static CliCmd* run_node_name_children[] = {
     &cmd_run_node_resolve,
     &cmd_run_node_ping,
@@ -650,6 +690,7 @@ static CliCmd* run_node_name_children[] = {
     &cmd_run_node_ping_bad_ip2,
     &cmd_run_node_udp,
     &cmd_run_node_udp_bad,
+    &cmd_run_node_arp_announce,
     0,
 };
 

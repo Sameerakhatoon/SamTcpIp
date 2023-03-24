@@ -187,6 +187,15 @@ static inline bool l2_frame_recv_qualify_on_interface(Interface* intf,
 // request for `ip_addr` out of `oif`.
 void send_arp_broadcast_request(Node* node, Interface* oif, char* ip_addr);
 
+// ch20: gratuitous ARP (RFC 5227 sec 2.3 announcement).
+// Emits a broadcast ARP REPLY with src_ip == dst_ip == oif's IP.
+// Peers see a "free" reply and update their ARP caches without
+// having asked. Used:
+//   - When the simulator-side IP changes (config interface ip).
+//   - On manual `run node X arp-announce`.
+// No-op if `oif` has no L3 IP configured.
+void send_gratuitous_arp(Node* node, Interface* oif);
+
 // ARP table lifecycle + CRUD.
 void      init_arp_table(ArpTable** arp_table);
 ArpEntry* arp_table_lookup(ArpTable* arp_table, char* ip_addr);
