@@ -6,6 +6,7 @@
 #include "Layer2/layer2.h"
 #include "Layer3/layer3.h"
 #include "Layer4/udp.h"
+#include "Layer4/tcp.h"
 #include "Layer5/ping.h"
 #include "tap.h"
 #include "cli.h"
@@ -28,6 +29,9 @@ static int   run_node_ping_bad_ip_handler(int argc, char** argv);
 static int   run_node_udp_handler(int argc, char** argv);
 static int   run_node_udp_bad_csum_handler(int argc, char** argv);
 static int   run_node_arp_announce_handler(int argc, char** argv);
+static int   config_tcp_listen_handler(int argc, char** argv);
+static int   show_node_tcp_handler(int argc, char** argv);
+static int   run_node_tcp_syn_handler(int argc, char** argv);
 static int   run_tap_open_handler(int argc, char** argv);
 static int   run_tap_close_handler(int argc, char** argv);
 static int   run_tap_attach_handler(int argc, char** argv);
@@ -412,6 +416,70 @@ static int run_node_arp_announce_handler(int argc, char** argv){
     return 0;
 }
 
+// ch22: `config node <node> tcp-listen <port>` - passive open.
+static int config_tcp_listen_handler(int argc, char** argv){
+    if(argc != 2){
+        fprintf(stderr, "config: expected <node> tcp-listen <port>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    int port = atoi(argv[1]);
+    if(port < 1 || port > 65535){
+        fprintf(stderr, "tcp-listen: port out of range\n");
+        return 1;
+    }
+    if(!tcp_listen(node, (unsigned short)port)){
+        return 1;
+    }
+    return 0;
+}
+
+// ch22: `show node <node> tcp` - dump TCBs on the node.
+static int show_node_tcp_handler(int argc, char** argv){
+    if(argc != 1){
+        fprintf(stderr, "show node tcp: expected <node>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    tcp_dump(node);
+    return 0;
+}
+
+// ch22: `run node <node> tcp-syn <ip> <dport>` - test fixture.
+static int run_node_tcp_syn_handler(int argc, char** argv){
+    if(argc != 3){
+        fprintf(stderr, "run node tcp-syn: expected <node> <ip> <dport>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    unsigned int dst_net = 0;
+    if(inet_pton(AF_INET, argv[1], &dst_net) != 1){
+        fprintf(stderr, "tcp-syn: bad ip\n");
+        return 1;
+    }
+    int dport = atoi(argv[2]);
+    if(dport < 1 || dport > 65535){
+        fprintf(stderr, "tcp-syn: dport out of range\n");
+        return 1;
+    }
+    // src_port: pick a high ephemeral one.
+    tcp_send_syn(node, htonl(dst_net), 33333, (unsigned short)dport);
+    usleep(200 * 1000);
+    return 0;
+}
+
 // ch14: `run tap open <name>` - opens /dev/net/tun with
 // IFF_TAP | IFF_NO_PI and stashes the fd globally. Calling twice
 // without close leaks the previous fd; that's an operator error
@@ -526,10 +594,17 @@ static CliCmd cmd_show_node_route = {
     .handler  = show_node_route_handler,
     .help     = "dump the node's L3 routing table",
 };
+// show node <name> tcp (ch22)
+static CliCmd cmd_show_node_tcp = {
+    .name     = "tcp",
+    .handler  = show_node_tcp_handler,
+    .help     = "dump the node's TCB list",
+};
 static CliCmd* show_node_name_children[] = {
     &cmd_show_node_arp,
     &cmd_show_node_mac,
     &cmd_show_node_route,
+    &cmd_show_node_tcp,
     0,
 };
 
@@ -683,6 +758,27 @@ static CliCmd cmd_run_node_arp_announce = {
     .help     = "broadcast a GARP on every L3 interface of <node>",
 };
 
+// ch22: run node <name> tcp-syn <ip> <dport>
+static CliCmd cmd_run_node_tcp_syn_dport = {
+    .name     = "<dport>",
+    .capture  = true,
+    .handler  = run_node_tcp_syn_handler,
+    .help     = "destination TCP port",
+};
+static CliCmd* run_node_tcp_syn_dport_children[] = { &cmd_run_node_tcp_syn_dport, 0 };
+static CliCmd cmd_run_node_tcp_syn_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .help     = "destination IP",
+    .children = run_node_tcp_syn_dport_children,
+};
+static CliCmd* run_node_tcp_syn_ip_children[] = { &cmd_run_node_tcp_syn_ip, 0 };
+static CliCmd cmd_run_node_tcp_syn = {
+    .name     = "tcp-syn",
+    .help     = "ch22 fixture: hand-build + send a TCP SYN",
+    .children = run_node_tcp_syn_ip_children,
+};
+
 static CliCmd* run_node_name_children[] = {
     &cmd_run_node_resolve,
     &cmd_run_node_ping,
@@ -691,6 +787,7 @@ static CliCmd* run_node_name_children[] = {
     &cmd_run_node_udp,
     &cmd_run_node_udp_bad,
     &cmd_run_node_arp_announce,
+    &cmd_run_node_tcp_syn,
     0,
 };
 
@@ -922,9 +1019,24 @@ static CliCmd cmd_config_route = {
     .children = config_route_prefix_children,
 };
 
+// ch22: config node <node> tcp-listen <port>
+static CliCmd cmd_config_tcp_listen_port = {
+    .name     = "<port>",
+    .capture  = true,
+    .handler  = config_tcp_listen_handler,
+    .help     = "TCP port to listen on",
+};
+static CliCmd* config_tcp_listen_port_children[] = { &cmd_config_tcp_listen_port, 0 };
+static CliCmd cmd_config_tcp_listen = {
+    .name     = "tcp-listen",
+    .help     = "install a passive TCP socket on <port>",
+    .children = config_tcp_listen_port_children,
+};
+
 static CliCmd* config_node_name_children[] = {
     &cmd_config_interface,
     &cmd_config_route,
+    &cmd_config_tcp_listen,
     0,
 };
 
@@ -972,6 +1084,7 @@ void nwcli_install(Graph* topo){
     ping_register();
     udp_register();
     udp_install_default_handlers(topo);
+    tcp_register();
     network_start_pkt_receiver_thread(topo);
     usleep(50 * 1000);
 }
