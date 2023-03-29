@@ -32,6 +32,7 @@ static int   run_node_arp_announce_handler(int argc, char** argv);
 static int   config_tcp_listen_handler(int argc, char** argv);
 static int   show_node_tcp_handler(int argc, char** argv);
 static int   run_node_tcp_syn_handler(int argc, char** argv);
+static int   run_node_tcp_send_handler(int argc, char** argv);
 static int   run_tap_open_handler(int argc, char** argv);
 static int   run_tap_close_handler(int argc, char** argv);
 static int   run_tap_attach_handler(int argc, char** argv);
@@ -480,6 +481,36 @@ static int run_node_tcp_syn_handler(int argc, char** argv){
     return 0;
 }
 
+// ch23: `run node <node> tcp-send <ip> <dport> <text>` - send
+// data on an existing ESTABLISHED TCB to (dst_ip, dst_port).
+static int run_node_tcp_send_handler(int argc, char** argv){
+    if(argc != 4){
+        fprintf(stderr, "run node tcp-send: expected <node> <ip> <dport> <text>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    unsigned int dst_net = 0;
+    if(inet_pton(AF_INET, argv[1], &dst_net) != 1){
+        fprintf(stderr, "tcp-send: bad ip\n");
+        return 1;
+    }
+    int dport = atoi(argv[2]);
+    if(dport < 1 || dport > 65535){
+        fprintf(stderr, "tcp-send: dport out of range\n");
+        return 1;
+    }
+    if(!tcp_send_data(node, htonl(dst_net), (unsigned short)dport,
+                      argv[3], strlen(argv[3]))){
+        return 1;
+    }
+    usleep(200 * 1000);
+    return 0;
+}
+
 // ch14: `run tap open <name>` - opens /dev/net/tun with
 // IFF_TAP | IFF_NO_PI and stashes the fd globally. Calling twice
 // without close leaks the previous fd; that's an operator error
@@ -779,6 +810,34 @@ static CliCmd cmd_run_node_tcp_syn = {
     .children = run_node_tcp_syn_ip_children,
 };
 
+// ch23: run node <name> tcp-send <ip> <dport> <text>
+static CliCmd cmd_run_node_tcp_send_text = {
+    .name     = "<text>",
+    .capture  = true,
+    .handler  = run_node_tcp_send_handler,
+    .help     = "payload string to send",
+};
+static CliCmd* run_node_tcp_send_text_children[] = { &cmd_run_node_tcp_send_text, 0 };
+static CliCmd cmd_run_node_tcp_send_dport = {
+    .name     = "<dport>",
+    .capture  = true,
+    .help     = "destination TCP port",
+    .children = run_node_tcp_send_text_children,
+};
+static CliCmd* run_node_tcp_send_dport_children[] = { &cmd_run_node_tcp_send_dport, 0 };
+static CliCmd cmd_run_node_tcp_send_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .help     = "destination IP",
+    .children = run_node_tcp_send_dport_children,
+};
+static CliCmd* run_node_tcp_send_ip_children[] = { &cmd_run_node_tcp_send_ip, 0 };
+static CliCmd cmd_run_node_tcp_send = {
+    .name     = "tcp-send",
+    .help     = "ch23 fixture: send data on an established TCB",
+    .children = run_node_tcp_send_ip_children,
+};
+
 static CliCmd* run_node_name_children[] = {
     &cmd_run_node_resolve,
     &cmd_run_node_ping,
@@ -788,6 +847,7 @@ static CliCmd* run_node_name_children[] = {
     &cmd_run_node_udp_bad,
     &cmd_run_node_arp_announce,
     &cmd_run_node_tcp_syn,
+    &cmd_run_node_tcp_send,
     0,
 };
 

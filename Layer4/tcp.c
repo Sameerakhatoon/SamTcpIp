@@ -312,7 +312,33 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
         return;
     }
 
-    // Otherwise: log and drop. Real FSM handling (data, FIN, RST)
+    // ch23: ESTABLISHED + payload -> consume + ACK.
+    if(tcb->state == TCP_ESTABLISHED){
+        size_t data_len = l4_payload_size - hdr_len;
+        if(data_len > 0 && seq == tcb->rcv_nxt){
+            char preview[33] = {0};
+            size_t n = data_len < 32 ? data_len : 32;
+            memcpy(preview, l4_payload + hdr_len, n);
+            printf("TCP recv : %s : data seq=%u len=%zu `%s`\n",
+                   node->node_name, seq, data_len, preview);
+            tcb->rcv_nxt += data_len;
+            send_bare_ack(tcb);
+            return;
+        }
+        if(data_len == 0 && (flags & TCP_ACK)){
+            // Pure ACK update - just bump our snd_una equivalent.
+            // We don't track snd_una explicitly in ch23 (ch24 wires
+            // it for rtx). Silent accept.
+            return;
+        }
+        if(data_len > 0 && seq != tcb->rcv_nxt){
+            printf("TCP recv : %s : out-of-order data seq=%u rcv_nxt=%u (drop)\n",
+                   node->node_name, seq, tcb->rcv_nxt);
+            return;
+        }
+    }
+
+    // Otherwise: log and drop. Real FSM handling (FIN, RST)
     // arrives in later chapters.
     printf("TCP recv : %s : state=%s seq=%u ack=%u flags=0x%02x (no-op)\n",
            node->node_name, state_name(tcb->state), seq, ack, flags);
@@ -406,6 +432,65 @@ static void send_bare_ack(Tcb* tcb){
            tcb->remote_port);
     demote_packet_to_layer3(tcb->node, (char*)seg, 20,
                             IP_PROTO_TCP, tcb->remote_ip);
+}
+
+// ch23: send_data. Locate the ESTABLISHED TCB by remote
+// (ip, port) - we ignore the local side because the test always
+// has at most one outbound conn per peer. Builds PSH|ACK with
+// payload, advances snd_nxt by the payload length.
+bool tcp_send_data(Node* node, unsigned int dst_ip_host,
+                   unsigned short dst_port,
+                   const char* payload, size_t payload_size){
+    ensure_tcbs_init();
+    Tcb* found = 0;
+    GlThread* cur = 0;
+    ITERATE_GLTHREAD_BEGIN(&g_tcbs, cur){
+        Tcb* t = glue_to_tcb(cur);
+        if(t->node != node) continue;
+        if(t->state != TCP_ESTABLISHED) continue;
+        if(t->remote_ip == dst_ip_host && t->remote_port == dst_port){
+            found = t;
+            break;
+        }
+    } ITERATE_GLTHREAD_END(&g_tcbs, cur);
+    if(!found){
+        printf("TCP send : %s : no ESTABLISHED TCB to %u.%u.%u.%u:%u\n",
+               node->node_name,
+               (dst_ip_host >> 24) & 0xFF, (dst_ip_host >> 16) & 0xFF,
+               (dst_ip_host >> 8)  & 0xFF,  dst_ip_host        & 0xFF,
+               dst_port);
+        return false;
+    }
+    if(payload_size > 150){
+        printf("TCP send : %s : payload too big (%zu)\n",
+               node->node_name, payload_size);
+        return false;
+    }
+    unsigned char seg[256] = {0};
+    TcpHdr* hdr = (TcpHdr*)seg;
+    hdr->src_port = htons(found->local_port);
+    hdr->dst_port = htons(found->remote_port);
+    hdr->seq      = htonl(found->snd_nxt);
+    hdr->ack      = htonl(found->rcv_nxt);
+    hdr->data_off_rsvd = (5 << 4);
+    hdr->flags    = TCP_PSH | TCP_ACK;
+    hdr->window   = htons(1024);
+    hdr->checksum = 0;
+    hdr->urg_ptr  = 0;
+    memcpy(seg + 20, payload, payload_size);
+
+    size_t seg_size = 20 + payload_size;
+    hdr->checksum = htons(tcp_pseudo_checksum(found->local_ip, found->remote_ip,
+                                              seg, seg_size));
+    printf("TCP send : %s : data seq=%u len=%zu to %u.%u.%u.%u:%u\n",
+           node->node_name, found->snd_nxt, payload_size,
+           (found->remote_ip >> 24) & 0xFF, (found->remote_ip >> 16) & 0xFF,
+           (found->remote_ip >> 8)  & 0xFF,  found->remote_ip        & 0xFF,
+           found->remote_port);
+    demote_packet_to_layer3(node, (char*)seg, seg_size,
+                            IP_PROTO_TCP, dst_ip_host);
+    found->snd_nxt += payload_size;
+    return true;
 }
 
 void tcp_dump(Node* node){

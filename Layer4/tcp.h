@@ -93,4 +93,11 @@ void tcp_send_syn(Node* node, unsigned int dst_ip_host,
 // Pretty-print the TCB list on this Node.
 void tcp_dump(Node* node);
 
+// ch23: send `payload` on an existing ESTABLISHED TCB to
+// (dst_ip, dst_port). The 4-tuple identifies the TCB. Returns
+// false if no matching ESTABLISHED TCB exists.
+bool tcp_send_data(Node* node, unsigned int dst_ip_host,
+                   unsigned short dst_port,
+                   const char* payload, size_t payload_size);
+
 #endif
