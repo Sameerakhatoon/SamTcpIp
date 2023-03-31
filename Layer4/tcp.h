@@ -59,6 +59,14 @@ typedef struct TcpHdr {
 #define TCP_SYN_RECEIVED    2
 #define TCP_SYN_SENT        3       // reserved for active-open chapter
 #define TCP_ESTABLISHED     4
+// ch26: orderly close.
+#define TCP_FIN_WAIT_1      5
+#define TCP_FIN_WAIT_2      6
+#define TCP_CLOSE_WAIT      7
+#define TCP_LAST_ACK        8
+// We collapse TIME_WAIT directly to CLOSED in ch26 (no 2*MSL
+// timer; documented). CLOSING is the simultaneous-close path
+// we don't exercise yet.
 
 typedef struct Tcb Tcb;
 struct Tcb {
@@ -99,5 +107,11 @@ void tcp_dump(Node* node);
 bool tcp_send_data(Node* node, unsigned int dst_ip_host,
                    unsigned short dst_port,
                    const char* payload, size_t payload_size);
+
+// ch26: initiate orderly close on the (node, dst_ip, dst_port)
+// TCB. Transitions ESTABLISHED -> FIN_WAIT_1 (sends FIN+ACK).
+// Or CLOSE_WAIT -> LAST_ACK if we already received a FIN.
+bool tcp_close(Node* node, unsigned int dst_ip_host,
+               unsigned short dst_port);
 
 #endif

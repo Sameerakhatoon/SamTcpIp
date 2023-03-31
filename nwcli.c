@@ -33,6 +33,7 @@ static int   config_tcp_listen_handler(int argc, char** argv);
 static int   show_node_tcp_handler(int argc, char** argv);
 static int   run_node_tcp_syn_handler(int argc, char** argv);
 static int   run_node_tcp_send_handler(int argc, char** argv);
+static int   run_node_tcp_close_handler(int argc, char** argv);
 static int   run_tap_open_handler(int argc, char** argv);
 static int   run_tap_close_handler(int argc, char** argv);
 static int   run_tap_attach_handler(int argc, char** argv);
@@ -511,6 +512,35 @@ static int run_node_tcp_send_handler(int argc, char** argv){
     return 0;
 }
 
+// ch26: `run node <node> tcp-close <ip> <dport>` - initiate
+// orderly close on the TCB to (ip, dport).
+static int run_node_tcp_close_handler(int argc, char** argv){
+    if(argc != 3){
+        fprintf(stderr, "run node tcp-close: expected <node> <ip> <dport>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    unsigned int dst_net = 0;
+    if(inet_pton(AF_INET, argv[1], &dst_net) != 1){
+        fprintf(stderr, "tcp-close: bad ip\n");
+        return 1;
+    }
+    int dport = atoi(argv[2]);
+    if(dport < 1 || dport > 65535){
+        fprintf(stderr, "tcp-close: dport out of range\n");
+        return 1;
+    }
+    if(!tcp_close(node, htonl(dst_net), (unsigned short)dport)){
+        return 1;
+    }
+    usleep(200 * 1000);
+    return 0;
+}
+
 // ch14: `run tap open <name>` - opens /dev/net/tun with
 // IFF_TAP | IFF_NO_PI and stashes the fd globally. Calling twice
 // without close leaks the previous fd; that's an operator error
@@ -838,6 +868,27 @@ static CliCmd cmd_run_node_tcp_send = {
     .children = run_node_tcp_send_ip_children,
 };
 
+// ch26: run node <name> tcp-close <ip> <dport>
+static CliCmd cmd_run_node_tcp_close_dport = {
+    .name     = "<dport>",
+    .capture  = true,
+    .handler  = run_node_tcp_close_handler,
+    .help     = "remote TCP port",
+};
+static CliCmd* run_node_tcp_close_dport_children[] = { &cmd_run_node_tcp_close_dport, 0 };
+static CliCmd cmd_run_node_tcp_close_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .help     = "remote IP",
+    .children = run_node_tcp_close_dport_children,
+};
+static CliCmd* run_node_tcp_close_ip_children[] = { &cmd_run_node_tcp_close_ip, 0 };
+static CliCmd cmd_run_node_tcp_close = {
+    .name     = "tcp-close",
+    .help     = "initiate orderly close on TCB to (ip, dport)",
+    .children = run_node_tcp_close_ip_children,
+};
+
 static CliCmd* run_node_name_children[] = {
     &cmd_run_node_resolve,
     &cmd_run_node_ping,
@@ -848,6 +899,7 @@ static CliCmd* run_node_name_children[] = {
     &cmd_run_node_arp_announce,
     &cmd_run_node_tcp_syn,
     &cmd_run_node_tcp_send,
+    &cmd_run_node_tcp_close,
     0,
 };
 

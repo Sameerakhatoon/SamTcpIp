@@ -27,6 +27,7 @@ static unsigned short tcp_parse_mss(unsigned char* opt_bytes, size_t opt_len);
 static unsigned int   tcp_pick_src_ip(Node* node, unsigned int dst_ip);
 static void           send_synack(Tcb* tcb, unsigned short src_mss);
 static void           send_bare_ack(Tcb* tcb);
+static void           send_fin_ack(Tcb* tcb);
 static const char*    state_name(unsigned char s);
 
 void                  tcp_register(void);
@@ -52,6 +53,10 @@ static const char* state_name(unsigned char s){
         case TCP_SYN_RECEIVED: return "SYN_RECEIVED";
         case TCP_SYN_SENT:     return "SYN_SENT";
         case TCP_ESTABLISHED:  return "ESTABLISHED";
+        case TCP_FIN_WAIT_1:   return "FIN_WAIT_1";
+        case TCP_FIN_WAIT_2:   return "FIN_WAIT_2";
+        case TCP_CLOSE_WAIT:   return "CLOSE_WAIT";
+        case TCP_LAST_ACK:     return "LAST_ACK";
         default:               return "?";
     }
 }
@@ -312,6 +317,58 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
         return;
     }
 
+    // ch26: FIN handling. Order matters - check FIN first so the
+    // associated ACK doesn't accidentally drop us into ESTABLISHED
+    // logic on a FIN-only segment.
+    if(flags & TCP_FIN){
+        switch(tcb->state){
+            case TCP_ESTABLISHED:
+                // Peer initiated close. We go to CLOSE_WAIT,
+                // ACK the FIN. Caller can then tcp_close to
+                // send our own FIN -> LAST_ACK.
+                tcb->rcv_nxt = seq + 1;     // FIN consumes one
+                tcb->state   = TCP_CLOSE_WAIT;
+                printf("TCP recv : %s : FIN seq=%u -> CLOSE_WAIT\n",
+                       node->node_name, seq);
+                send_bare_ack(tcb);
+                return;
+            case TCP_FIN_WAIT_1:
+                // We sent FIN and they responded with FIN+ACK
+                // (combined paths). Both sides closed.
+                tcb->rcv_nxt = seq + 1;
+                tcb->state   = TCP_CLOSED;
+                printf("TCP recv : %s : FIN+ACK seq=%u -> CLOSED\n",
+                       node->node_name, seq);
+                send_bare_ack(tcb);
+                return;
+            case TCP_FIN_WAIT_2:
+                tcb->rcv_nxt = seq + 1;
+                tcb->state   = TCP_CLOSED;
+                printf("TCP recv : %s : FIN seq=%u -> CLOSED (skipped TIME_WAIT)\n",
+                       node->node_name, seq);
+                send_bare_ack(tcb);
+                return;
+        }
+    }
+
+    // ch26: ACK that finishes FIN_WAIT_1 -> FIN_WAIT_2 (peer
+    // ACKed our FIN but hasn't sent their own yet).
+    if(tcb->state == TCP_FIN_WAIT_1 && (flags & TCP_ACK)
+       && ack == tcb->snd_nxt){
+        tcb->state = TCP_FIN_WAIT_2;
+        printf("TCP recv : %s : ACK ack=%u -> FIN_WAIT_2\n",
+               node->node_name, ack);
+        return;
+    }
+    // LAST_ACK -> CLOSED on the final ACK.
+    if(tcb->state == TCP_LAST_ACK && (flags & TCP_ACK)
+       && ack == tcb->snd_nxt){
+        tcb->state = TCP_CLOSED;
+        printf("TCP recv : %s : ACK ack=%u -> CLOSED\n",
+               node->node_name, ack);
+        return;
+    }
+
     // ch23: ESTABLISHED + payload -> consume + ACK.
     if(tcb->state == TCP_ESTABLISHED){
         size_t data_len = l4_payload_size - hdr_len;
@@ -408,6 +465,33 @@ void tcp_send_syn(Node* node, unsigned int dst_ip_host,
                             IP_PROTO_TCP, dst_ip_host);
 }
 
+// ch26: send a FIN|ACK on this TCB. snd_nxt advances by 1 (FIN
+// consumes a sequence number).
+static void send_fin_ack(Tcb* tcb){
+    unsigned char seg[32] = {0};
+    TcpHdr* hdr = (TcpHdr*)seg;
+    hdr->src_port = htons(tcb->local_port);
+    hdr->dst_port = htons(tcb->remote_port);
+    hdr->seq      = htonl(tcb->snd_nxt);
+    hdr->ack      = htonl(tcb->rcv_nxt);
+    hdr->data_off_rsvd = (5 << 4);
+    hdr->flags    = TCP_FIN | TCP_ACK;
+    hdr->window   = htons(1024);
+    hdr->checksum = 0;
+    hdr->urg_ptr  = 0;
+
+    hdr->checksum = htons(tcp_pseudo_checksum(tcb->local_ip, tcb->remote_ip,
+                                              seg, 20));
+    printf("TCP send : %s : FIN seq=%u ack=%u to %u.%u.%u.%u:%u\n",
+           tcb->node->node_name, tcb->snd_nxt, tcb->rcv_nxt,
+           (tcb->remote_ip >> 24) & 0xFF, (tcb->remote_ip >> 16) & 0xFF,
+           (tcb->remote_ip >> 8)  & 0xFF,  tcb->remote_ip        & 0xFF,
+           tcb->remote_port);
+    demote_packet_to_layer3(tcb->node, (char*)seg, 20,
+                            IP_PROTO_TCP, tcb->remote_ip);
+    tcb->snd_nxt += 1;
+}
+
 // Send a bare ACK with no payload (used to complete the
 // 3-way handshake from the active side).
 static void send_bare_ack(Tcb* tcb){
@@ -491,6 +575,43 @@ bool tcp_send_data(Node* node, unsigned int dst_ip_host,
                             IP_PROTO_TCP, dst_ip_host);
     found->snd_nxt += payload_size;
     return true;
+}
+
+bool tcp_close(Node* node, unsigned int dst_ip_host,
+               unsigned short dst_port){
+    ensure_tcbs_init();
+    Tcb* t = 0;
+    GlThread* cur = 0;
+    ITERATE_GLTHREAD_BEGIN(&g_tcbs, cur){
+        Tcb* x = glue_to_tcb(cur);
+        if(x->node != node) continue;
+        if(x->remote_ip == dst_ip_host && x->remote_port == dst_port){
+            t = x; break;
+        }
+    } ITERATE_GLTHREAD_END(&g_tcbs, cur);
+    if(!t){
+        printf("TCP close : %s : no TCB to %u.%u.%u.%u:%u\n",
+               node->node_name,
+               (dst_ip_host >> 24) & 0xFF, (dst_ip_host >> 16) & 0xFF,
+               (dst_ip_host >> 8)  & 0xFF,  dst_ip_host        & 0xFF,
+               dst_port);
+        return false;
+    }
+    if(t->state == TCP_ESTABLISHED){
+        t->state = TCP_FIN_WAIT_1;
+        printf("TCP close : %s : ESTABLISHED -> FIN_WAIT_1\n", node->node_name);
+        send_fin_ack(t);
+        return true;
+    }
+    if(t->state == TCP_CLOSE_WAIT){
+        t->state = TCP_LAST_ACK;
+        printf("TCP close : %s : CLOSE_WAIT -> LAST_ACK\n", node->node_name);
+        send_fin_ack(t);
+        return true;
+    }
+    printf("TCP close : %s : state=%s, no-op\n",
+           node->node_name, state_name(t->state));
+    return false;
 }
 
 void tcp_dump(Node* node){
