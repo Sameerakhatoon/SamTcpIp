@@ -28,6 +28,16 @@ static unsigned int   tcp_pick_src_ip(Node* node, unsigned int dst_ip);
 static void           send_synack(Tcb* tcb, unsigned short src_mss);
 static void           send_bare_ack(Tcb* tcb);
 static void           send_fin_ack(Tcb* tcb);
+// ch27: bare RST. Used in three ways:
+//   - reply to an unsolicited segment (no TCB).
+//   - reply to a SYN at a port with no listener.
+//   - emit before tearing down a TCB in error.
+// Caller supplies the 4-tuple + the seq/ack values to fill in.
+static void           send_rst_segment(Node* node,
+                                       unsigned int local_ip, unsigned short local_port,
+                                       unsigned int remote_ip, unsigned short remote_port,
+                                       unsigned int seq, unsigned int ack,
+                                       bool with_ack);
 static const char*    state_name(unsigned char s);
 
 void                  tcp_register(void);
@@ -94,6 +104,7 @@ static Tcb* tcb_find_listener(Node* node, unsigned short local_port){
 }
 
 static Tcb* tcb_alloc(Node* node){
+    ensure_tcbs_init();           // ch27 fix: alloc was not initialising the list head
     Tcb* t = calloc(1, sizeof(Tcb));
     if(!t) return 0;
     t->node     = node;
@@ -265,10 +276,21 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
         if(flags & TCP_SYN){
             Tcb* lst = tcb_find_listener(node, dst_port);
             if(!lst){
-                printf("TCP recv : %s : SYN to closed port %u (drop, no RST yet)\n",
+                // ch27: SYN to a closed port -> emit RST|ACK so
+                // the peer knows the port is not open. Use seq=0,
+                // ack=seq+1 (we acknowledge their SYN's sequence
+                // number even though we don't accept it).
+                printf("TCP recv : %s : SYN to closed port %u -> RST\n",
                        node->node_name, dst_port);
+                send_rst_segment(node, ip_hdr->dst_ip, dst_port,
+                                 ip_hdr->src_ip, src_port,
+                                 0, seq + 1, true);
                 return;
             }
+            // ch27 stays as a side check: don't emit anything weird
+            // back if the SYN was actually a RST (defensive; SYN+RST
+            // is nonsense per RFC 793 but cheap to ignore).
+            if(flags & TCP_RST) return;
             // Spawn a child TCB in SYN_RECEIVED.
             Tcb* child = tcb_alloc(node);
             if(!child) return;
@@ -290,7 +312,30 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
             send_synack(child, mss);
             return;
         }
-        printf("TCP recv : %s : segment for unknown 4-tuple (drop)\n", node->node_name);
+        // ch27: non-SYN segment for an unknown 4-tuple. Real TCP
+        // emits RST so the peer abandons its half-state. Skip if
+        // the inbound is itself a RST (don't ping-pong RSTs).
+        if(flags & TCP_RST){
+            printf("TCP recv : %s : RST for unknown 4-tuple (drop, silent)\n",
+                   node->node_name);
+            return;
+        }
+        printf("TCP recv : %s : segment for unknown 4-tuple -> RST\n",
+               node->node_name);
+        unsigned int rst_seq = (flags & TCP_ACK) ? ack : 0;
+        unsigned int rst_ack = (flags & TCP_ACK) ? 0   : seq + 1;
+        send_rst_segment(node, ip_hdr->dst_ip, dst_port,
+                         ip_hdr->src_ip, src_port,
+                         rst_seq, rst_ack, !(flags & TCP_ACK));
+        return;
+    }
+
+    // ch27: RST on an existing TCB -> immediate transition to CLOSED.
+    // The peer has signaled abort; we MUST NOT keep using the TCB.
+    if(flags & TCP_RST){
+        printf("TCP recv : %s : RST received in state=%s -> CLOSED\n",
+               node->node_name, state_name(tcb->state));
+        tcb->state = TCP_CLOSED;
         return;
     }
 
@@ -490,6 +535,35 @@ static void send_fin_ack(Tcb* tcb){
     demote_packet_to_layer3(tcb->node, (char*)seg, 20,
                             IP_PROTO_TCP, tcb->remote_ip);
     tcb->snd_nxt += 1;
+}
+
+// ch27: build + send a bare RST. No options; 20-byte header.
+static void send_rst_segment(Node* node,
+                             unsigned int local_ip, unsigned short local_port,
+                             unsigned int remote_ip, unsigned short remote_port,
+                             unsigned int seq, unsigned int ack,
+                             bool with_ack){
+    unsigned char seg[32] = {0};
+    TcpHdr* hdr = (TcpHdr*)seg;
+    hdr->src_port = htons(local_port);
+    hdr->dst_port = htons(remote_port);
+    hdr->seq      = htonl(seq);
+    hdr->ack      = htonl(ack);
+    hdr->data_off_rsvd = (5 << 4);
+    hdr->flags    = TCP_RST | (with_ack ? TCP_ACK : 0);
+    hdr->window   = 0;
+    hdr->checksum = 0;
+    hdr->urg_ptr  = 0;
+
+    hdr->checksum = htons(tcp_pseudo_checksum(local_ip, remote_ip, seg, 20));
+    printf("TCP send : %s : RST%s seq=%u ack=%u to %u.%u.%u.%u:%u\n",
+           node->node_name, with_ack ? "|ACK" : "",
+           seq, ack,
+           (remote_ip >> 24) & 0xFF, (remote_ip >> 16) & 0xFF,
+           (remote_ip >> 8)  & 0xFF,  remote_ip        & 0xFF,
+           remote_port);
+    demote_packet_to_layer3(node, (char*)seg, 20,
+                            IP_PROTO_TCP, remote_ip);
 }
 
 // Send a bare ACK with no payload (used to complete the
