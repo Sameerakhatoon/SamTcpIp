@@ -14,6 +14,7 @@ OBJECTS  = build/graph.o \
            build/Layer4/udp.o \
            build/Layer4/tcp.o \
            build/Layer5/ping.o \
+           build/Layer5/http.o \
            build/tap.o \
            build/pcap.o \
            build/topologies.o \
@@ -87,6 +88,10 @@ build/pcap.o: pcap.c pcap.h
 build/Layer5/ping.o: Layer5/ping.c Layer5/ping.h Layer3/layer3.h Layer3/icmp.h graph.h net.h
 	@mkdir -p build/Layer5
 	$(CC) $(CFLAGS) -c Layer5/ping.c -o build/Layer5/ping.o
+
+build/Layer5/http.o: Layer5/http.c Layer5/http.h Layer4/tcp.h graph.h
+	@mkdir -p build/Layer5
+	$(CC) $(CFLAGS) -c Layer5/http.c -o build/Layer5/http.o
 
 build/topologies.o: topologies.c graph.h net.h
 	@mkdir -p build

@@ -69,6 +69,11 @@ typedef struct TcpHdr {
 // we don't exercise yet.
 
 typedef struct Tcb Tcb;
+// ch29: per-TCB data callback. Called when ESTABLISHED + data
+// arrives. Handler can call tcp_send_data + tcp_close to drive
+// the conversation.
+typedef void (*TcpOnData)(Tcb* tcb, const char* data, size_t len);
+
 struct Tcb {
     Node*           node;
     unsigned int    local_ip;       // host order (matches our IP convention)
@@ -80,6 +85,7 @@ struct Tcb {
     unsigned int    snd_nxt;        // next byte to send (relative to iss)
     unsigned int    rcv_nxt;        // next byte we expect from peer
     unsigned short  peer_mss;       // from SYN option; 536 default
+    TcpOnData       on_data;        // ch29: app-layer hook
     GlThread        glue;
 };
 GLTHREAD_TO_STRUCT(glue_to_tcb, Tcb, glue);
@@ -91,6 +97,11 @@ void tcp_register(void);
 // with SYN-ACK; the resulting TCB ends up in ESTABLISHED after
 // the third leg. Idempotent on duplicate port.
 bool tcp_listen(Node* node, unsigned short port);
+
+// ch29: same as tcp_listen but also stashes an `on_data`
+// callback. Child TCBs spawned from this listener inherit it.
+bool tcp_listen_with_handler(Node* node, unsigned short port,
+                             TcpOnData on_data);
 
 // Manual SYN emit for tests + ops (no full active-open FSM yet).
 // Builds a SYN with our chosen ISN, computes the pseudo-csum,

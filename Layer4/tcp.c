@@ -291,6 +291,8 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
             // back if the SYN was actually a RST (defensive; SYN+RST
             // is nonsense per RFC 793 but cheap to ignore).
             if(flags & TCP_RST) return;
+            // ch29: child TCB inherits the listener's on_data
+            // callback (set below right after alloc).
             // Spawn a child TCB in SYN_RECEIVED.
             Tcb* child = tcb_alloc(node);
             if(!child) return;
@@ -300,6 +302,7 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
             child->remote_port = src_port;
             child->state       = TCP_SYN_RECEIVED;
             child->rcv_nxt     = seq + 1;     // peer's SYN consumes one
+            child->on_data     = lst->on_data; // ch29: inherit handler
             // Parse MSS option if present.
             unsigned short mss = tcp_parse_mss((unsigned char*)l4_payload + sizeof(TcpHdr),
                                                 hdr_len - sizeof(TcpHdr));
@@ -425,6 +428,10 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
                    node->node_name, seq, data_len, preview);
             tcb->rcv_nxt += data_len;
             send_bare_ack(tcb);
+            // ch29: dispatch to the app handler if registered.
+            if(tcb->on_data){
+                tcb->on_data(tcb, l4_payload + hdr_len, data_len);
+            }
             return;
         }
         if(data_len == 0 && (flags & TCP_ACK)){
@@ -451,7 +458,11 @@ void tcp_register(void){
 }
 
 bool tcp_listen(Node* node, unsigned short port){
-    // Don't double-register on the same port.
+    return tcp_listen_with_handler(node, port, NULL);
+}
+
+bool tcp_listen_with_handler(Node* node, unsigned short port,
+                             TcpOnData on_data){
     if(tcb_find_listener(node, port)){
         printf("TCP listen : %s : port %u already listening\n",
                node->node_name, port);
@@ -461,7 +472,10 @@ bool tcp_listen(Node* node, unsigned short port){
     if(!t) return false;
     t->state      = TCP_LISTEN;
     t->local_port = port;
-    printf("TCP listen : %s : port %u\n", node->node_name, port);
+    t->on_data    = on_data;
+    printf("TCP listen : %s : port %u%s\n",
+           node->node_name, port,
+           on_data ? " (handler installed)" : "");
     return true;
 }
 

@@ -8,6 +8,7 @@
 #include "Layer4/udp.h"
 #include "Layer4/tcp.h"
 #include "Layer5/ping.h"
+#include "Layer5/http.h"
 #include "tap.h"
 #include "pcap.h"
 #include "cli.h"
@@ -31,6 +32,7 @@ static int   run_node_udp_handler(int argc, char** argv);
 static int   run_node_udp_bad_csum_handler(int argc, char** argv);
 static int   run_node_arp_announce_handler(int argc, char** argv);
 static int   config_tcp_listen_handler(int argc, char** argv);
+static int   config_http_listen_handler(int argc, char** argv);
 static int   show_node_tcp_handler(int argc, char** argv);
 static int   run_node_tcp_syn_handler(int argc, char** argv);
 static int   run_node_tcp_send_handler(int argc, char** argv);
@@ -438,6 +440,29 @@ static int config_tcp_listen_handler(int argc, char** argv){
         return 1;
     }
     if(!tcp_listen(node, (unsigned short)port)){
+        return 1;
+    }
+    return 0;
+}
+
+// ch29: `config node <node> http-listen <port>` - install the
+// HTTP hello responder on (node, port).
+static int config_http_listen_handler(int argc, char** argv){
+    if(argc != 2){
+        fprintf(stderr, "config: expected <node> http-listen <port>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    int port = atoi(argv[1]);
+    if(port < 1 || port > 65535){
+        fprintf(stderr, "http-listen: port out of range\n");
+        return 1;
+    }
+    if(!http_hello_install(node, (unsigned short)port)){
         return 1;
     }
     return 0;
@@ -1192,10 +1217,25 @@ static CliCmd cmd_config_tcp_listen = {
     .children = config_tcp_listen_port_children,
 };
 
+// ch29: config node <node> http-listen <port>
+static CliCmd cmd_config_http_listen_port = {
+    .name     = "<port>",
+    .capture  = true,
+    .handler  = config_http_listen_handler,
+    .help     = "HTTP port to listen on",
+};
+static CliCmd* config_http_listen_port_children[] = { &cmd_config_http_listen_port, 0 };
+static CliCmd cmd_config_http_listen = {
+    .name     = "http-listen",
+    .help     = "install the hello-world HTTP responder on <port>",
+    .children = config_http_listen_port_children,
+};
+
 static CliCmd* config_node_name_children[] = {
     &cmd_config_interface,
     &cmd_config_route,
     &cmd_config_tcp_listen,
+    &cmd_config_http_listen,
     0,
 };
 
