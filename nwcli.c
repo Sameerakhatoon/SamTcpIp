@@ -9,6 +9,7 @@
 #include "Layer4/tcp.h"
 #include "Layer5/ping.h"
 #include "tap.h"
+#include "pcap.h"
 #include "cli.h"
 #include "comm.h"
 #include "graph.h"
@@ -34,6 +35,8 @@ static int   show_node_tcp_handler(int argc, char** argv);
 static int   run_node_tcp_syn_handler(int argc, char** argv);
 static int   run_node_tcp_send_handler(int argc, char** argv);
 static int   run_node_tcp_close_handler(int argc, char** argv);
+static int   run_pcap_start_handler(int argc, char** argv);
+static int   run_pcap_stop_handler(int argc, char** argv);
 static int   run_tap_open_handler(int argc, char** argv);
 static int   run_tap_close_handler(int argc, char** argv);
 static int   run_tap_attach_handler(int argc, char** argv);
@@ -541,6 +544,20 @@ static int run_node_tcp_close_handler(int argc, char** argv){
     return 0;
 }
 
+// ch28: run pcap start <file> / run pcap stop
+static int run_pcap_start_handler(int argc, char** argv){
+    if(argc != 1){
+        fprintf(stderr, "run pcap start: expected <file>\n");
+        return 1;
+    }
+    return pcap_open_file(argv[0]) == 0 ? 0 : 1;
+}
+static int run_pcap_stop_handler(int argc, char** argv){
+    (void)argc; (void)argv;
+    pcap_close_file();
+    return 0;
+}
+
 // ch14: `run tap open <name>` - opens /dev/net/tun with
 // IFF_TAP | IFF_NO_PI and stashes the fd globally. Calling twice
 // without close leaks the previous fd; that's an operator error
@@ -1028,10 +1045,40 @@ static CliCmd cmd_run_tap = {
     .children = run_tap_children,
 };
 
+// ch28: run pcap start <file> / run pcap stop
+static CliCmd cmd_run_pcap_start_file = {
+    .name     = "<file>",
+    .capture  = true,
+    .handler  = run_pcap_start_handler,
+    .help     = "output pcap file path",
+};
+static CliCmd* run_pcap_start_file_children[] = { &cmd_run_pcap_start_file, 0 };
+static CliCmd cmd_run_pcap_start = {
+    .name     = "start",
+    .help     = "begin capturing every frame to <file>",
+    .children = run_pcap_start_file_children,
+};
+static CliCmd cmd_run_pcap_stop = {
+    .name     = "stop",
+    .handler  = run_pcap_stop_handler,
+    .help     = "stop the active capture",
+};
+static CliCmd* run_pcap_children[] = {
+    &cmd_run_pcap_start,
+    &cmd_run_pcap_stop,
+    0,
+};
+static CliCmd cmd_run_pcap = {
+    .name     = "pcap",
+    .help     = "ch28 packet capture controls",
+    .children = run_pcap_children,
+};
+
 static CliCmd* run_children[] = {
     &cmd_run_send,
     &cmd_run_node,
     &cmd_run_tap,
+    &cmd_run_pcap,
     0,
 };
 

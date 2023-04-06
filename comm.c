@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include "comm.h"
 #include "graph.h"
+#include "pcap.h"
 #include "tap.h"
 
 // Forward declarations.
@@ -161,6 +162,9 @@ int send_pkt_out(char* pkt, size_t pkt_size, Interface* oif){
     if(pkt_size + IF_NAME_SIZE > MAX_PACKET_BUFFER_SIZE){
         return -1;
     }
+    // ch28: capture egress frame.
+    pcap_dump_frame(pkt, pkt_size);
+
     // ch16: TAP egress. When the oif is the TAP-attached interface,
     // the wire is the kernel's TAP device, not the simulator's UDP
     // loopback. We write the raw frame directly; no peer-side aux
@@ -246,6 +250,8 @@ static void init_pkt_recv_mtx(void){
 int pkt_receive(Node* node, Interface* iif, char* pkt, size_t pkt_size){
     pthread_once(&g_pkt_recv_mtx_once, init_pkt_recv_mtx);
     pthread_mutex_lock(&g_pkt_recv_mtx);
+    // ch28: capture ingress frame.
+    pcap_dump_frame(pkt, pkt_size);
     layer2_frame_recv(node, iif, pkt, pkt_size);
     pthread_mutex_unlock(&g_pkt_recv_mtx);
     return 0;
