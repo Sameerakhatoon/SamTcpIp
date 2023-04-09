@@ -120,26 +120,10 @@ static Tcb* tcb_alloc(Node* node){
     return t;
 }
 
-// ---- src_ip pick (inline, will promote when third caller appears) ------
+// ---- ch30: src_ip pick now uses shared node_pick_src_ip ------
 
 static unsigned int tcp_pick_src_ip(Node* node, unsigned int dst_ip){
-    char dst_str[16];
-    unsigned int net = htonl(dst_ip);
-    inet_ntop(AF_INET, &net, dst_str, 16);
-    dst_str[15] = '\0';
-
-    Interface* iface = node_get_matching_subnet_interface(node, dst_str);
-    if(iface){
-        unsigned int src_net = 0;
-        inet_pton(AF_INET, IF_IP(iface), &src_net);
-        return htonl(src_net);
-    }
-    if(node->node_nw_prop.is_lb_addr_config){
-        unsigned int lb_net = 0;
-        inet_pton(AF_INET, NODE_LO_ADDR(node), &lb_net);
-        return htonl(lb_net);
-    }
-    return 0;
+    return node_pick_src_ip(node, dst_ip);
 }
 
 // ---- Pseudo-header checksum (same algorithm as UDP) --------------------

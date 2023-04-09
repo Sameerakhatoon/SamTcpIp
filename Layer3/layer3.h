@@ -76,6 +76,21 @@ static inline void initialize_ip_hdr(IpHdr* h){
 // that the receiver's verify path actually drops bad IP headers.
 void l3_test_force_ip_csum_corruption(bool on);
 
+// ch30: shared source-IP selector. UDP (ch13) and TCP (ch22)
+// each had inline near-identical copies; promote here so a
+// third caller (or curl-out) gets consistent semantics.
+//
+// `dst_ip` is in host byte order. Algorithm:
+//   1. LPM lookup. If a route exists with an explicit oif
+//      (not direct), use that interface's IP.
+//   2. Else subnet-match: find the interface whose subnet
+//      contains dst_ip directly.
+//   3. Else fall back to the node's loopback IP if configured.
+//   4. Else 0.
+//
+// Returns host-byte-order IP.
+unsigned int node_pick_src_ip(struct Node* node, unsigned int dst_ip_host);
+
 // ---- Routing table -------------------------------------------------------
 
 typedef struct L3Route L3Route;

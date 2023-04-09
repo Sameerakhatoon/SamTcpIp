@@ -25,6 +25,42 @@ void l3_test_force_ip_csum_corruption(bool on){
     g_force_ip_csum_corrupt = on;
 }
 
+// ch30: shared source-IP selector. See layer3.h for the contract.
+unsigned int node_pick_src_ip(Node* node, unsigned int dst_ip_host){
+    // 1. LPM lookup: if the resolved route names an oif, use
+    //    that interface's IP. (Indirect routes go through a
+    //    gateway, so the egress oif is what matters for src.)
+    L3Route* route = l3rib_lookup_lpm(NODE_RT_TABLE(node), dst_ip_host);
+    if(route && !route->is_direct && route->oif[0] != '\0'){
+        Interface* iface = get_node_if_by_name(node, route->oif);
+        if(iface && IS_INTF_L3_MODE(iface)){
+            unsigned int src_net = 0;
+            if(inet_pton(AF_INET, IF_IP(iface), &src_net) == 1){
+                return htonl(src_net);
+            }
+        }
+    }
+    // 2. Subnet-match for directly-connected.
+    char dst_str[16];
+    unsigned int net = htonl(dst_ip_host);
+    inet_ntop(AF_INET, &net, dst_str, 16);
+    dst_str[15] = '\0';
+    Interface* iface = node_get_matching_subnet_interface(node, dst_str);
+    if(iface){
+        unsigned int src_net = 0;
+        if(inet_pton(AF_INET, IF_IP(iface), &src_net) == 1){
+            return htonl(src_net);
+        }
+    }
+    // 3. Loopback fallback.
+    if(node->node_nw_prop.is_lb_addr_config){
+        unsigned int lb_net = 0;
+        inet_pton(AF_INET, NODE_LO_ADDR(node), &lb_net);
+        return htonl(lb_net);
+    }
+    return 0;
+}
+
 // Forward declarations.
 static bool _rt_table_entry_add(RtTable* rt_table, L3Route* l3_route);
 static bool l3_is_direct_route(L3Route* route);

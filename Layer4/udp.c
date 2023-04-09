@@ -87,28 +87,9 @@ void udp_unbind(Node* node, unsigned short port){
 
 // ---- src_ip pick --------------------------------------------------------
 
-// ch13 inline. Pick the interface IP that matches the dst's
-// directly-connected subnet; fall back to loopback. ch11 ping
-// has the same logic; per PLAN.md rule 1, no shared helper yet.
-// If a third caller appears we promote to layer3.h.
+// ch30: was inline, now uses shared node_pick_src_ip in layer3.
 static unsigned int udp_pick_src_ip(Node* node, unsigned int dst_ip){
-    char dst_str[16];
-    unsigned int net = htonl(dst_ip);
-    inet_ntop(AF_INET, &net, dst_str, 16);
-    dst_str[15] = '\0';
-
-    Interface* iface = node_get_matching_subnet_interface(node, dst_str);
-    if(iface){
-        unsigned int src_net = 0;
-        inet_pton(AF_INET, IF_IP(iface), &src_net);
-        return htonl(src_net);
-    }
-    if(node->node_nw_prop.is_lb_addr_config){
-        unsigned int lb_net = 0;
-        inet_pton(AF_INET, NODE_LO_ADDR(node), &lb_net);
-        return htonl(lb_net);
-    }
-    return 0;
+    return node_pick_src_ip(node, dst_ip);
 }
 
 // ---- Checksum -----------------------------------------------------------

@@ -34,6 +34,7 @@ static int   run_node_arp_announce_handler(int argc, char** argv);
 static int   config_tcp_listen_handler(int argc, char** argv);
 static int   config_http_listen_handler(int argc, char** argv);
 static int   show_node_tcp_handler(int argc, char** argv);
+static int   show_node_pick_src_handler(int argc, char** argv);
 static int   run_node_tcp_syn_handler(int argc, char** argv);
 static int   run_node_tcp_send_handler(int argc, char** argv);
 static int   run_node_tcp_close_handler(int argc, char** argv);
@@ -468,6 +469,31 @@ static int config_http_listen_handler(int argc, char** argv){
     return 0;
 }
 
+// ch30: `show node <node> pick-src <dst-ip>` - dump the source IP
+// node_pick_src_ip would choose for an originate to dst.
+static int show_node_pick_src_handler(int argc, char** argv){
+    if(argc != 2){
+        fprintf(stderr, "show node pick-src: expected <node> <dst-ip>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    unsigned int dst_net = 0;
+    if(inet_pton(AF_INET, argv[1], &dst_net) != 1){
+        fprintf(stderr, "show node pick-src: bad ip\n");
+        return 1;
+    }
+    unsigned int src = node_pick_src_ip(node, htonl(dst_net));
+    printf("pick-src : %s : dst=%s -> src=%u.%u.%u.%u\n",
+           node->node_name, argv[1],
+           (src >> 24) & 0xFF, (src >> 16) & 0xFF,
+           (src >> 8)  & 0xFF,  src        & 0xFF);
+    return 0;
+}
+
 // ch22: `show node <node> tcp` - dump TCBs on the node.
 static int show_node_tcp_handler(int argc, char** argv){
     if(argc != 1){
@@ -703,11 +729,25 @@ static CliCmd cmd_show_node_tcp = {
     .handler  = show_node_tcp_handler,
     .help     = "dump the node's TCB list",
 };
+// show node <name> pick-src <dst-ip> (ch30)
+static CliCmd cmd_show_node_pick_src_ip = {
+    .name     = "<dst-ip>",
+    .capture  = true,
+    .handler  = show_node_pick_src_handler,
+    .help     = "destination IP to probe",
+};
+static CliCmd* show_node_pick_src_ip_children[] = { &cmd_show_node_pick_src_ip, 0 };
+static CliCmd cmd_show_node_pick_src = {
+    .name     = "pick-src",
+    .help     = "show which src IP node_pick_src_ip would choose for <dst-ip>",
+    .children = show_node_pick_src_ip_children,
+};
 static CliCmd* show_node_name_children[] = {
     &cmd_show_node_arp,
     &cmd_show_node_mac,
     &cmd_show_node_route,
     &cmd_show_node_tcp,
+    &cmd_show_node_pick_src,
     0,
 };
 
