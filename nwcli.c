@@ -38,6 +38,7 @@ static int   show_node_pick_src_handler(int argc, char** argv);
 static int   run_node_tcp_syn_handler(int argc, char** argv);
 static int   run_node_tcp_send_handler(int argc, char** argv);
 static int   run_node_tcp_close_handler(int argc, char** argv);
+static int   run_node_tcp_connect_handler(int argc, char** argv);
 static int   run_pcap_start_handler(int argc, char** argv);
 static int   run_pcap_stop_handler(int argc, char** argv);
 static int   run_tap_open_handler(int argc, char** argv);
@@ -595,6 +596,35 @@ static int run_node_tcp_close_handler(int argc, char** argv){
     return 0;
 }
 
+// ch32: `run node <node> tcp-connect <ip> <dport>` - active open
+// using the ephemeral port pool.
+static int run_node_tcp_connect_handler(int argc, char** argv){
+    if(argc != 3){
+        fprintf(stderr, "run node tcp-connect: expected <node> <ip> <dport>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    unsigned int dst_net = 0;
+    if(inet_pton(AF_INET, argv[1], &dst_net) != 1){
+        fprintf(stderr, "tcp-connect: bad ip\n");
+        return 1;
+    }
+    int dport = atoi(argv[2]);
+    if(dport < 1 || dport > 65535){
+        fprintf(stderr, "tcp-connect: dport out of range\n");
+        return 1;
+    }
+    if(tcp_connect(node, htonl(dst_net), (unsigned short)dport) == 0){
+        return 1;
+    }
+    usleep(200 * 1000);
+    return 0;
+}
+
 // ch28: run pcap start <file> / run pcap stop
 static int run_pcap_start_handler(int argc, char** argv){
     if(argc != 1){
@@ -950,6 +980,27 @@ static CliCmd cmd_run_node_tcp_send = {
     .children = run_node_tcp_send_ip_children,
 };
 
+// ch32: run node <name> tcp-connect <ip> <dport>
+static CliCmd cmd_run_node_tcp_connect_dport = {
+    .name     = "<dport>",
+    .capture  = true,
+    .handler  = run_node_tcp_connect_handler,
+    .help     = "remote TCP port",
+};
+static CliCmd* run_node_tcp_connect_dport_children[] = { &cmd_run_node_tcp_connect_dport, 0 };
+static CliCmd cmd_run_node_tcp_connect_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .help     = "destination IP",
+    .children = run_node_tcp_connect_dport_children,
+};
+static CliCmd* run_node_tcp_connect_ip_children[] = { &cmd_run_node_tcp_connect_ip, 0 };
+static CliCmd cmd_run_node_tcp_connect = {
+    .name     = "tcp-connect",
+    .help     = "active open with ephemeral source port",
+    .children = run_node_tcp_connect_ip_children,
+};
+
 // ch26: run node <name> tcp-close <ip> <dport>
 static CliCmd cmd_run_node_tcp_close_dport = {
     .name     = "<dport>",
@@ -982,6 +1033,7 @@ static CliCmd* run_node_name_children[] = {
     &cmd_run_node_tcp_syn,
     &cmd_run_node_tcp_send,
     &cmd_run_node_tcp_close,
+    &cmd_run_node_tcp_connect,
     0,
 };
 

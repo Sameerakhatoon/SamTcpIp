@@ -103,11 +103,17 @@ bool tcp_listen(Node* node, unsigned short port);
 bool tcp_listen_with_handler(Node* node, unsigned short port,
                              TcpOnData on_data);
 
-// Manual SYN emit for tests + ops (no full active-open FSM yet).
-// Builds a SYN with our chosen ISN, computes the pseudo-csum,
-// hands to L3.
+// Manual SYN emit for tests + ops (fixed src_port chosen by
+// caller). Used by tests that need deterministic 4-tuples.
 void tcp_send_syn(Node* node, unsigned int dst_ip_host,
                   unsigned short src_port, unsigned short dst_port);
+
+// ch32: real active-open. Allocates an ephemeral source port
+// (Linux range 32768-60999, walks existing TCBs to avoid
+// collisions), then drives the same SYN_SENT path. Returns the
+// chosen local port or 0 on failure.
+unsigned short tcp_connect(Node* node, unsigned int dst_ip_host,
+                           unsigned short dst_port);
 
 // Pretty-print the TCB list on this Node.
 void tcp_dump(Node* node);

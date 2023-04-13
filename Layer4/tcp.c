@@ -44,7 +44,12 @@ void                  tcp_register(void);
 bool                  tcp_listen(Node* node, unsigned short port);
 void                  tcp_send_syn(Node* node, unsigned int dst_ip_host,
                                    unsigned short src_port, unsigned short dst_port);
+unsigned short        tcp_connect(Node* node, unsigned int dst_ip_host,
+                                  unsigned short dst_port);
 void                  tcp_dump(Node* node);
+static unsigned short tcp_alloc_ephemeral_port(Node* node, unsigned int local_ip,
+                                               unsigned int remote_ip,
+                                               unsigned short remote_port);
 
 // One global TCB list. Same structure as udp_bindings.
 static GlThread g_tcbs;
@@ -684,6 +689,53 @@ bool tcp_close(Node* node, unsigned int dst_ip_host,
     printf("TCP close : %s : state=%s, no-op\n",
            node->node_name, state_name(t->state));
     return false;
+}
+
+// ch32: ephemeral port allocator. Linux uses 32768-60999. We
+// scan that range linearly looking for a port not in use on the
+// same (node, local_ip) for the same remote 4-tuple. Two TCBs
+// can share a local port if their 4-tuples differ.
+static unsigned short tcp_alloc_ephemeral_port(Node* node, unsigned int local_ip,
+                                               unsigned int remote_ip,
+                                               unsigned short remote_port){
+    ensure_tcbs_init();
+    static unsigned short next = 32768;
+    for(int tries = 0; tries < (60999 - 32768 + 1); tries++){
+        unsigned short candidate = next;
+        next++;
+        if(next > 60999) next = 32768;
+        // Collision check: is there a TCB on (node, local_ip,
+        // candidate, remote_ip, remote_port) already?
+        Tcb* exists = tcb_find(node, local_ip, candidate, remote_ip, remote_port);
+        if(!exists) return candidate;
+    }
+    return 0;     // pool exhausted
+}
+
+unsigned short tcp_connect(Node* node, unsigned int dst_ip_host,
+                           unsigned short dst_port){
+    unsigned int src_ip = node_pick_src_ip(node, dst_ip_host);
+    if(src_ip == 0){
+        printf("TCP connect : %s : no src IP for dst\n", node->node_name);
+        return 0;
+    }
+    unsigned short src_port = tcp_alloc_ephemeral_port(node, src_ip,
+                                                       dst_ip_host, dst_port);
+    if(src_port == 0){
+        printf("TCP connect : %s : ephemeral port pool exhausted\n",
+               node->node_name);
+        return 0;
+    }
+    printf("TCP connect : %s : src=%u.%u.%u.%u:%u -> dst=%u.%u.%u.%u:%u\n",
+           node->node_name,
+           (src_ip >> 24) & 0xFF, (src_ip >> 16) & 0xFF,
+           (src_ip >> 8)  & 0xFF,  src_ip        & 0xFF,
+           src_port,
+           (dst_ip_host >> 24) & 0xFF, (dst_ip_host >> 16) & 0xFF,
+           (dst_ip_host >> 8)  & 0xFF,  dst_ip_host        & 0xFF,
+           dst_port);
+    tcp_send_syn(node, dst_ip_host, src_port, dst_port);
+    return src_port;
 }
 
 void tcp_dump(Node* node){
