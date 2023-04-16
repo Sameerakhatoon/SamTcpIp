@@ -39,6 +39,7 @@ static int   run_node_tcp_syn_handler(int argc, char** argv);
 static int   run_node_tcp_send_handler(int argc, char** argv);
 static int   run_node_tcp_close_handler(int argc, char** argv);
 static int   run_node_tcp_connect_handler(int argc, char** argv);
+static int   run_node_udp_big_handler(int argc, char** argv);
 static int   run_pcap_start_handler(int argc, char** argv);
 static int   run_pcap_stop_handler(int argc, char** argv);
 static int   run_tap_open_handler(int argc, char** argv);
@@ -625,6 +626,42 @@ static int run_node_tcp_connect_handler(int argc, char** argv){
     return 0;
 }
 
+// ch34: `run node <node> udp-big <ip> <bytes>` - send a large
+// UDP payload to ip:7 (echo). bytes > IP_MAX_FRAG_PAYLOAD
+// triggers IP fragmentation on emit + reassembly on receive.
+static int run_node_udp_big_handler(int argc, char** argv){
+    if(argc != 3){
+        fprintf(stderr, "run node udp-big: expected <node> <ip> <bytes>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    unsigned int dst_net = 0;
+    if(inet_pton(AF_INET, argv[1], &dst_net) != 1){
+        fprintf(stderr, "udp-big: bad ip\n");
+        return 1;
+    }
+    int bytes = atoi(argv[2]);
+    if(bytes < 1 || bytes > 1400){
+        fprintf(stderr, "udp-big: bytes out of range (1..1400)\n");
+        return 1;
+    }
+    // Pre-warm ARP so the first fragment doesn't drop.
+    for(short seq = 1; seq <= 2; seq++){
+        ping_send_request(node, argv[1], seq);
+        usleep(200 * 1000);
+    }
+    char buf[1500];
+    for(int i = 0; i < bytes; i++) buf[i] = (char)('A' + (i % 26));
+    udp_send_pkt(node, htonl(dst_net), UDP_PRINTER_PORT, UDP_ECHO_PORT,
+                 buf, (size_t)bytes);
+    usleep(300 * 1000);
+    return 0;
+}
+
 // ch28: run pcap start <file> / run pcap stop
 static int run_pcap_start_handler(int argc, char** argv){
     if(argc != 1){
@@ -980,6 +1017,27 @@ static CliCmd cmd_run_node_tcp_send = {
     .children = run_node_tcp_send_ip_children,
 };
 
+// ch34: run node <name> udp-big <ip> <bytes>
+static CliCmd cmd_run_node_udp_big_bytes = {
+    .name     = "<bytes>",
+    .capture  = true,
+    .handler  = run_node_udp_big_handler,
+    .help     = "payload size to send (>100 triggers fragmentation)",
+};
+static CliCmd* run_node_udp_big_bytes_children[] = { &cmd_run_node_udp_big_bytes, 0 };
+static CliCmd cmd_run_node_udp_big_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .help     = "destination IP",
+    .children = run_node_udp_big_bytes_children,
+};
+static CliCmd* run_node_udp_big_ip_children[] = { &cmd_run_node_udp_big_ip, 0 };
+static CliCmd cmd_run_node_udp_big = {
+    .name     = "udp-big",
+    .help     = "ch34 fixture: send a large UDP that fragments",
+    .children = run_node_udp_big_ip_children,
+};
+
 // ch32: run node <name> tcp-connect <ip> <dport>
 static CliCmd cmd_run_node_tcp_connect_dport = {
     .name     = "<dport>",
@@ -1034,6 +1092,7 @@ static CliCmd* run_node_name_children[] = {
     &cmd_run_node_tcp_send,
     &cmd_run_node_tcp_close,
     &cmd_run_node_tcp_connect,
+    &cmd_run_node_udp_big,
     0,
 };
 

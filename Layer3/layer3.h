@@ -76,6 +76,21 @@ static inline void initialize_ip_hdr(IpHdr* h){
 // that the receiver's verify path actually drops bad IP headers.
 void l3_test_force_ip_csum_corruption(bool on);
 
+// ch34: IPv4 fragmentation parameters. demote splits payloads
+// larger than IP_MAX_FRAG_PAYLOAD (the per-fragment IP payload
+// budget; not counting the 20-byte IP header) into fragments
+// with the same id, MF=1 except the last, frag_offset in 8-byte
+// units per RFC 791. Receiver reassembles by (src_ip, dst_ip,
+// protocol, id).
+//
+// 100 is small enough to make fragmentation visible in tests
+// (a 250-byte UDP becomes 3 fragments) and 100 = 12*8 + 4 - we
+// round chunk sizes down to a multiple of 8 except the last,
+// which can carry a sub-8-byte tail.
+#define IP_MAX_FRAG_PAYLOAD     100
+#define IP_REASM_BUF_BYTES      1600    // max reassembled L4 payload
+#define IP_REASM_TIMEOUT_MS     30000   // RFC 791 lower bound is 15s; we use 30s
+
 // ch30: shared source-IP selector. UDP (ch13) and TCP (ch22)
 // each had inline near-identical copies; promote here so a
 // third caller (or curl-out) gets consistent semantics.

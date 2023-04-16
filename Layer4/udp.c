@@ -137,13 +137,15 @@ static unsigned short udp_pseudo_checksum(unsigned int src_ip,
 void udp_send_pkt(Node* node, unsigned int dst_ip,
                   unsigned short src_port, unsigned short dst_port,
                   const char* payload, size_t payload_size){
-    // demote_packet_to_layer3 caps at 200; keep us under that.
-    if(payload_size > 150){
+    // ch34: demote now fragments anything > IP_MAX_FRAG_PAYLOAD;
+    // udp_send_pkt's old cap (150) was an artifact. Cap at 1400
+    // for buffer + reassembly headroom.
+    if(payload_size > 1400){
         printf("UDP send drop : %s : payload too big (%zu)\n",
                node->node_name, payload_size);
         return;
     }
-    unsigned char seg[256] = {0};
+    unsigned char seg[1500] = {0};
     UdpHdr*       hdr      = (UdpHdr*)seg;
     size_t        seg_size = sizeof(UdpHdr) + payload_size;
 
