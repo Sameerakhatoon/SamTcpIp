@@ -28,11 +28,20 @@ void init_mac_table(MacTable** mac_table){
     init_glthread(&(*mac_table)->mac_entries);
 }
 
+// ch35: monotonic ms helper for aging.
+#include <time.h>
+static long mac_now_ms(void){
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec * 1000L + (long)ts.tv_nsec / 1000000L;
+}
+
 MacTableEntry* mac_table_lookup(MacTable* mac_table, char* mac){
     GlThread* cur = 0;
     ITERATE_GLTHREAD_BEGIN(&mac_table->mac_entries, cur){
         MacTableEntry* e = mac_entry_glue_to_mac_entry(cur);
         if(strncmp((char*)e->mac.mac, mac, sizeof(MacAddr)) == 0){
+            e->last_seen_ms = mac_now_ms();   // ch35: refresh on hit
             return e;
         }
     } ITERATE_GLTHREAD_END(&mac_table->mac_entries, cur);
@@ -70,8 +79,28 @@ bool mac_table_entry_add(MacTable* mac_table, MacTableEntry* entry){
         delete_mac_table_entry(mac_table, (char*)old->mac.mac);
     }
     init_glthread(&entry->mac_entry_glue);
+    entry->last_seen_ms = mac_now_ms();    // ch35: stamp on install
     glthread_add_next(&mac_table->mac_entries, &entry->mac_entry_glue);
     return true;
+}
+
+// ch35: walk + remove stale MAC entries.
+int mac_age(MacTable* mac_table, long threshold_ms){
+    if(!mac_table || threshold_ms < 0) return 0;
+    long now = mac_now_ms();
+    int removed = 0;
+    GlThread* cur = 0;
+    ITERATE_GLTHREAD_BEGIN(&mac_table->mac_entries, cur){
+        MacTableEntry* e = mac_entry_glue_to_mac_entry(cur);
+        long age = now - e->last_seen_ms;
+        if(age < threshold_ms) continue;
+        printf("MAC age : timeout age=%ldms (threshold=%ldms)\n",
+               age, threshold_ms);
+        remove_glthread(cur);
+        free(e);
+        removed++;
+    } ITERATE_GLTHREAD_END(&mac_table->mac_entries, cur);
+    return removed;
 }
 
 void dump_mac_table(MacTable* mac_table){

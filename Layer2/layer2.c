@@ -48,11 +48,20 @@ void init_arp_table(ArpTable** arp_table){
     init_glthread(&(*arp_table)->arp_entries);
 }
 
+// ch35: monotonic ms helper for aging.
+#include <time.h>
+static long l2_now_ms(void){
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec * 1000L + (long)ts.tv_nsec / 1000000L;
+}
+
 ArpEntry* arp_table_lookup(ArpTable* arp_table, char* ip_addr){
     GlThread* cur = 0;
     ITERATE_GLTHREAD_BEGIN(&arp_table->arp_entries, cur){
         ArpEntry* e = arp_glue_to_arp_entry(cur);
         if(strncmp((char*)e->ip_addr.ip_addr, ip_addr, 16) == 0){
+            e->last_seen_ms = l2_now_ms();  // ch35: refresh on hit
             return e;
         }
     } ITERATE_GLTHREAD_END(&arp_table->arp_entries, cur);
@@ -93,8 +102,28 @@ bool arp_table_entry_add(ArpTable* arp_table, ArpEntry* arp_entry){
         delete_arp_table_entry(arp_table, (char*)old->ip_addr.ip_addr);
     }
     init_glthread(&arp_entry->arp_glue);
+    arp_entry->last_seen_ms = l2_now_ms();   // ch35: stamp on install
     glthread_add_next(&arp_table->arp_entries, &arp_entry->arp_glue);
     return true;
+}
+
+// ch35: walk + remove stale ARP entries.
+int arp_age(ArpTable* arp_table, long threshold_ms){
+    if(!arp_table || threshold_ms < 0) return 0;
+    long now = l2_now_ms();
+    int removed = 0;
+    GlThread* cur = 0;
+    ITERATE_GLTHREAD_BEGIN(&arp_table->arp_entries, cur){
+        ArpEntry* e = arp_glue_to_arp_entry(cur);
+        long age = now - e->last_seen_ms;
+        if(age < threshold_ms) continue;
+        printf("ARP age : %s : timeout age=%ldms (threshold=%ldms)\n",
+               (char*)e->ip_addr.ip_addr, age, threshold_ms);
+        remove_glthread(cur);
+        free(e);
+        removed++;
+    } ITERATE_GLTHREAD_END(&arp_table->arp_entries, cur);
+    return removed;
 }
 
 void arp_table_update_from_arp_reply(ArpTable* arp_table, ArpHdr* arp_hdr, Interface* iif){

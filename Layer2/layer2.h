@@ -111,6 +111,7 @@ struct ArpEntry {
     IpAddr   ip_addr;                // key
     MacAddr  mac_addr;
     char     oif_name[IF_NAME_SIZE];
+    long     last_seen_ms;           // ch35: refreshed on install + lookup hit
     GlThread arp_glue;
 };
 GLTHREAD_TO_STRUCT(arp_glue_to_arp_entry, ArpEntry, arp_glue);
@@ -228,6 +229,7 @@ typedef struct MacTableEntry MacTableEntry;
 struct MacTableEntry {
     MacAddr  mac;                    // key
     char     oif_name[IF_NAME_SIZE];
+    long     last_seen_ms;           // ch35: refreshed on install + lookup hit
     GlThread mac_entry_glue;
 };
 GLTHREAD_TO_STRUCT(mac_entry_glue_to_mac_entry, MacTableEntry, mac_entry_glue);
@@ -242,6 +244,11 @@ void           clear_mac_table(MacTable* mac_table);
 void           delete_mac_table_entry(MacTable* mac_table, char* mac);
 bool           mac_table_entry_add(MacTable* mac_table, MacTableEntry* entry);
 void           dump_mac_table(MacTable* mac_table);
+
+// ch35: aging. Walks the table, removes entries whose
+// last_seen_ms is older than threshold. Returns count removed.
+int            arp_age(ArpTable* arp_table, long threshold_ms);
+int            mac_age(MacTable* mac_table, long threshold_ms);
 
 // Entry point - called by layer2_frame_recv when the receiving
 // interface is in L2 mode.

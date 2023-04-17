@@ -40,6 +40,8 @@ static int   run_node_tcp_send_handler(int argc, char** argv);
 static int   run_node_tcp_close_handler(int argc, char** argv);
 static int   run_node_tcp_connect_handler(int argc, char** argv);
 static int   run_node_udp_big_handler(int argc, char** argv);
+static int   run_node_arp_age_handler(int argc, char** argv);
+static int   run_node_mac_age_handler(int argc, char** argv);
 static int   run_pcap_start_handler(int argc, char** argv);
 static int   run_pcap_stop_handler(int argc, char** argv);
 static int   run_tap_open_handler(int argc, char** argv);
@@ -662,6 +664,40 @@ static int run_node_udp_big_handler(int argc, char** argv){
     return 0;
 }
 
+// ch35: run node X arp-age <ms> / mac-age <ms>
+static int run_node_arp_age_handler(int argc, char** argv){
+    if(argc != 2){
+        fprintf(stderr, "run node arp-age: expected <node> <threshold-ms>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    long t = atol(argv[1]);
+    int n = arp_age(NODE_ARP_TABLE(node), t);
+    printf("ARP age : %s : removed %d stale entry(s) (threshold=%ldms)\n",
+           node->node_name, n, t);
+    return 0;
+}
+static int run_node_mac_age_handler(int argc, char** argv){
+    if(argc != 2){
+        fprintf(stderr, "run node mac-age: expected <node> <threshold-ms>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    long t = atol(argv[1]);
+    int n = mac_age(NODE_MAC_TABLE(node), t);
+    printf("MAC age : %s : removed %d stale entry(s) (threshold=%ldms)\n",
+           node->node_name, n, t);
+    return 0;
+}
+
 // ch28: run pcap start <file> / run pcap stop
 static int run_pcap_start_handler(int argc, char** argv){
     if(argc != 1){
@@ -1017,6 +1053,33 @@ static CliCmd cmd_run_node_tcp_send = {
     .children = run_node_tcp_send_ip_children,
 };
 
+// ch35: run node <name> arp-age <ms>
+static CliCmd cmd_run_node_arp_age_ms = {
+    .name     = "<ms>",
+    .capture  = true,
+    .handler  = run_node_arp_age_handler,
+    .help     = "max age in ms before an ARP entry is dropped",
+};
+static CliCmd* run_node_arp_age_ms_children[] = { &cmd_run_node_arp_age_ms, 0 };
+static CliCmd cmd_run_node_arp_age = {
+    .name     = "arp-age",
+    .help     = "drop ARP entries older than <ms>",
+    .children = run_node_arp_age_ms_children,
+};
+// ch35: run node <name> mac-age <ms>
+static CliCmd cmd_run_node_mac_age_ms = {
+    .name     = "<ms>",
+    .capture  = true,
+    .handler  = run_node_mac_age_handler,
+    .help     = "max age in ms before a MAC entry is dropped",
+};
+static CliCmd* run_node_mac_age_ms_children[] = { &cmd_run_node_mac_age_ms, 0 };
+static CliCmd cmd_run_node_mac_age = {
+    .name     = "mac-age",
+    .help     = "drop MAC entries older than <ms>",
+    .children = run_node_mac_age_ms_children,
+};
+
 // ch34: run node <name> udp-big <ip> <bytes>
 static CliCmd cmd_run_node_udp_big_bytes = {
     .name     = "<bytes>",
@@ -1093,6 +1156,8 @@ static CliCmd* run_node_name_children[] = {
     &cmd_run_node_tcp_close,
     &cmd_run_node_tcp_connect,
     &cmd_run_node_udp_big,
+    &cmd_run_node_arp_age,
+    &cmd_run_node_mac_age,
     0,
 };
 
