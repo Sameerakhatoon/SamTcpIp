@@ -11,6 +11,7 @@
 #include "Layer5/http.h"
 #include "tap.h"
 #include "pcap.h"
+#include "log.h"
 #include "cli.h"
 #include "comm.h"
 #include "graph.h"
@@ -44,6 +45,8 @@ static int   run_node_arp_age_handler(int argc, char** argv);
 static int   run_node_mac_age_handler(int argc, char** argv);
 static int   run_pcap_start_handler(int argc, char** argv);
 static int   run_pcap_stop_handler(int argc, char** argv);
+static int   run_log_level_handler(int argc, char** argv);
+static int   run_log_test_handler(int argc, char** argv);
 static int   run_tap_open_handler(int argc, char** argv);
 static int   run_tap_close_handler(int argc, char** argv);
 static int   run_tap_attach_handler(int argc, char** argv);
@@ -698,6 +701,27 @@ static int run_node_mac_age_handler(int argc, char** argv){
     return 0;
 }
 
+// ch37: `run log-level <name>` sets the global filter.
+static int run_log_level_handler(int argc, char** argv){
+    if(argc != 1){
+        fprintf(stderr, "run log-level: expected debug|info|warn|error\n");
+        return 1;
+    }
+    log_set_level_by_name(argv[0]);
+    return 0;
+}
+
+// ch37: `run log-test` emits one line at each level so tests can
+// assert level filtering.
+static int run_log_test_handler(int argc, char** argv){
+    (void)argc; (void)argv;
+    LOG_DEBUG("debug-line\n");
+    LOG_INFO ("info-line\n");
+    LOG_WARN ("warn-line\n");
+    LOG_ERROR("error-line\n");
+    return 0;
+}
+
 // ch28: run pcap start <file> / run pcap stop
 static int run_pcap_start_handler(int argc, char** argv){
     if(argc != 1){
@@ -1315,11 +1339,32 @@ static CliCmd cmd_run_pcap = {
     .children = run_pcap_children,
 };
 
+// ch37: run log-level <name> + run log-test
+static CliCmd cmd_run_log_level_name = {
+    .name     = "<level>",
+    .capture  = true,
+    .handler  = run_log_level_handler,
+    .help     = "debug | info | warn | error",
+};
+static CliCmd* run_log_level_name_children[] = { &cmd_run_log_level_name, 0 };
+static CliCmd cmd_run_log_level = {
+    .name     = "log-level",
+    .help     = "set the global LOG_* filter",
+    .children = run_log_level_name_children,
+};
+static CliCmd cmd_run_log_test = {
+    .name     = "log-test",
+    .handler  = run_log_test_handler,
+    .help     = "emit one line at each LOG_* level",
+};
+
 static CliCmd* run_children[] = {
     &cmd_run_send,
     &cmd_run_node,
     &cmd_run_tap,
     &cmd_run_pcap,
+    &cmd_run_log_level,
+    &cmd_run_log_test,
     0,
 };
 

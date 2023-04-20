@@ -17,6 +17,7 @@ OBJECTS  = build/graph.o \
            build/Layer5/http.o \
            build/tap.o \
            build/pcap.o \
+           build/log.o \
            build/topologies.o \
            build/gluethread/glthread.o
 
@@ -84,6 +85,10 @@ build/tap.o: tap.c tap.h comm.h graph.h
 build/pcap.o: pcap.c pcap.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c pcap.c -o build/pcap.o
+
+build/log.o: log.c log.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -c log.c -o build/log.o
 
 build/Layer5/ping.o: Layer5/ping.c Layer5/ping.h Layer3/layer3.h Layer3/icmp.h graph.h net.h
 	@mkdir -p build/Layer5
