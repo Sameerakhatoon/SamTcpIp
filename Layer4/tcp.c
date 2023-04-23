@@ -119,7 +119,17 @@ static Tcb* tcb_alloc(Node* node){
     // avoid clashes across concurrent TCBs.
     t->iss      = 0x1000;
     t->snd_nxt  = t->iss;
+    t->snd_una  = t->iss;
     t->peer_mss = 536;     // RFC 879 default if no MSS option.
+    // ch40: RFC 5681 - initial cwnd = 1 segment (we use the SMSS
+    // we've initialized, peer_mss; updated when we learn peer's
+    // real MSS from a SYN/SYNACK option). ssthresh starts high
+    // so we stay in slow start until something signals loss.
+    t->cwnd        = t->peer_mss;
+    t->ssthresh    = 65535;
+    // ch41: until peer sends a real window, assume one full
+    // segment of headroom (avoids zero-window deadlock on init).
+    t->peer_window = t->peer_mss;
     init_glthread(&t->glue);
     glthread_add_last(&g_tcbs, &t->glue);
     return t;
@@ -334,8 +344,14 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
     // Existing TCB. ch22 only cares about completing the handshake.
     if(tcb->state == TCP_SYN_RECEIVED && (flags & TCP_ACK) && ack == tcb->iss + 1){
         tcb->state = TCP_ESTABLISHED;
+        // ch40: handshake-consumed byte is now acked.
+        tcb->snd_una     = ack;
+        tcb->peer_window = (unsigned int)ntohs(hdr->window);
+        tcb->cwnd        = tcb->peer_mss;
         printf("TCP recv : %s : ACK seq=%u ack=%u -> ESTABLISHED\n",
                node->node_name, seq, ack);
+        printf("TCP cwnd : %s : init cwnd=%u ssthresh=%u peer_win=%u\n",
+               node->node_name, tcb->cwnd, tcb->ssthresh, tcb->peer_window);
         return;
     }
     // Active-open: received SYN-ACK while we were in SYN_SENT.
@@ -347,9 +363,15 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
         unsigned short mss = tcp_parse_mss((unsigned char*)l4_payload + sizeof(TcpHdr),
                                             hdr_len - sizeof(TcpHdr));
         if(mss > 0) tcb->peer_mss = mss;
-        tcb->state = TCP_ESTABLISHED;
+        tcb->state       = TCP_ESTABLISHED;
+        // ch40/41: SYN-ACK acked our SYN. Lock in snd_una + window.
+        tcb->snd_una     = ack;
+        tcb->peer_window = (unsigned int)ntohs(hdr->window);
+        tcb->cwnd        = tcb->peer_mss;
         printf("TCP recv : %s : SYN-ACK seq=%u ack=%u (peer_mss=%u) -> ESTABLISHED\n",
                node->node_name, seq, ack, tcb->peer_mss);
+        printf("TCP cwnd : %s : init cwnd=%u ssthresh=%u peer_win=%u\n",
+               node->node_name, tcb->cwnd, tcb->ssthresh, tcb->peer_window);
         send_bare_ack(tcb);
         return;
     }
@@ -424,9 +446,36 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
             return;
         }
         if(data_len == 0 && (flags & TCP_ACK)){
-            // Pure ACK update - just bump our snd_una equivalent.
-            // We don't track snd_una explicitly in ch23 (ch24 wires
-            // it for rtx). Silent accept.
+            // ch40: pure ACK - advance snd_una and grow cwnd if
+            // the ACK actually moves the cumulative position.
+            // ch41: also snapshot the peer's advertised window.
+            unsigned int new_win = (unsigned int)ntohs(hdr->window);
+            if(new_win != tcb->peer_window){
+                tcb->peer_window = new_win;
+                printf("TCP cwnd : %s : peer_window=%u\n",
+                       node->node_name, tcb->peer_window);
+            }
+            if(ack > tcb->snd_una){
+                unsigned int acked = ack - tcb->snd_una;
+                tcb->snd_una = ack;
+                if(tcb->cwnd <= tcb->ssthresh){
+                    // Slow start: cwnd grows by 1 MSS per ACK.
+                    tcb->cwnd += tcb->peer_mss;
+                    printf("TCP cwnd : %s : slow-start ack=%u acked=%u cwnd=%u ssthresh=%u\n",
+                           node->node_name, ack, acked,
+                           tcb->cwnd, tcb->ssthresh);
+                } else {
+                    // Congestion avoidance: cwnd += MSS*MSS/cwnd
+                    // per ACK (RFC 5681 sec 3.1).
+                    unsigned int inc = (unsigned int)tcb->peer_mss
+                                     * (unsigned int)tcb->peer_mss / tcb->cwnd;
+                    if(inc == 0) inc = 1;
+                    tcb->cwnd += inc;
+                    printf("TCP cwnd : %s : cong-avoid ack=%u acked=%u cwnd=%u ssthresh=%u\n",
+                           node->node_name, ack, acked,
+                           tcb->cwnd, tcb->ssthresh);
+                }
+            }
             return;
         }
         if(data_len > 0 && seq != tcb->rcv_nxt){
@@ -627,6 +676,23 @@ bool tcp_send_data(Node* node, unsigned int dst_ip_host,
                node->node_name, payload_size);
         return false;
     }
+    // ch41: send-side window enforcement.
+    //
+    //   allowed = min(cwnd, peer_window) - in_flight
+    //
+    // in_flight is bytes we've sent but not yet seen ACKed
+    // (snd_nxt - snd_una). If the new chunk wouldn't fit we
+    // refuse it - real TCP would queue + drain on ACK; we
+    // print and drop, which is enough to prove the gate.
+    unsigned int in_flight   = found->snd_nxt - found->snd_una;
+    unsigned int window_room = found->cwnd < found->peer_window
+                              ? found->cwnd : found->peer_window;
+    if(in_flight + payload_size > window_room){
+        printf("TCP send : %s : window-blocked in_flight=%u + len=%zu > min(cwnd=%u, peer_win=%u)\n",
+               node->node_name, in_flight, payload_size,
+               found->cwnd, found->peer_window);
+        return false;
+    }
     unsigned char seg[256] = {0};
     TcpHdr* hdr = (TcpHdr*)seg;
     hdr->src_port = htons(found->local_port);
@@ -651,6 +717,36 @@ bool tcp_send_data(Node* node, unsigned int dst_ip_host,
     demote_packet_to_layer3(node, (char*)seg, seg_size,
                             IP_PROTO_TCP, dst_ip_host);
     found->snd_nxt += payload_size;
+    return true;
+}
+
+// ch40: artificially trigger a loss event. RFC 5681 sec 3.1:
+//   ssthresh = max(FlightSize/2, 2*SMSS)
+//   cwnd     = SMSS
+// Returns false if no matching TCB.
+bool tcp_simulate_loss(Node* node, unsigned int dst_ip_host,
+                       unsigned short dst_port){
+    ensure_tcbs_init();
+    Tcb* t = 0;
+    GlThread* cur = 0;
+    ITERATE_GLTHREAD_BEGIN(&g_tcbs, cur){
+        Tcb* x = glue_to_tcb(cur);
+        if(x->node != node) continue;
+        if(x->remote_ip == dst_ip_host && x->remote_port == dst_port){
+            t = x; break;
+        }
+    } ITERATE_GLTHREAD_END(&g_tcbs, cur);
+    if(!t){
+        printf("TCP loss : %s : no TCB to dst\n", node->node_name);
+        return false;
+    }
+    unsigned int flight = t->snd_nxt - t->snd_una;
+    unsigned int half   = flight / 2;
+    unsigned int two_mss = (unsigned int)t->peer_mss * 2u;
+    t->ssthresh = half > two_mss ? half : two_mss;
+    t->cwnd     = t->peer_mss;
+    printf("TCP cwnd : %s : LOSS flight=%u cwnd=%u ssthresh=%u\n",
+           node->node_name, flight, t->cwnd, t->ssthresh);
     return true;
 }
 
@@ -746,12 +842,13 @@ void tcp_dump(Node* node){
     ITERATE_GLTHREAD_BEGIN(&g_tcbs, cur){
         Tcb* t = glue_to_tcb(cur);
         if(t->node != node) continue;
-        printf("  [%d] state=%s local=%u remote=%u.%u.%u.%u:%u peer_mss=%u\n",
+        printf("  [%d] state=%s local=%u remote=%u.%u.%u.%u:%u peer_mss=%u snd_una=%u snd_nxt=%u cwnd=%u ssthresh=%u peer_win=%u\n",
                idx++, state_name(t->state),
                t->local_port,
                (t->remote_ip >> 24) & 0xFF, (t->remote_ip >> 16) & 0xFF,
                (t->remote_ip >> 8)  & 0xFF,  t->remote_ip        & 0xFF,
-               t->remote_port, t->peer_mss);
+               t->remote_port, t->peer_mss,
+               t->snd_una, t->snd_nxt, t->cwnd, t->ssthresh, t->peer_window);
     } ITERATE_GLTHREAD_END(&g_tcbs, cur);
     if(idx == 0){
         printf("  (none)\n");

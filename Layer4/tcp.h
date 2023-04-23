@@ -85,6 +85,21 @@ struct Tcb {
     unsigned int    snd_nxt;        // next byte to send (relative to iss)
     unsigned int    rcv_nxt;        // next byte we expect from peer
     unsigned short  peer_mss;       // from SYN option; 536 default
+    // ch40: RFC 5681 congestion control.
+    //   snd_una   = oldest unACKed byte (advances on incoming ACK)
+    //   cwnd      = congestion window in BYTES
+    //   ssthresh  = slow-start threshold in BYTES
+    // Slow start: cwnd += MSS per ACK (cwnd <= ssthresh).
+    // Congestion avoidance: cwnd += max(1, MSS*MSS/cwnd) per ACK.
+    // Loss event (tcp simulate-loss / future RTO): ssthresh =
+    //   max(2*MSS, cwnd/2); cwnd = MSS; reset to slow start.
+    unsigned int    snd_una;
+    unsigned int    cwnd;
+    unsigned int    ssthresh;
+    // ch41: peer-advertised window from the most recent segment.
+    // Send-side enforcement compares (snd_nxt - snd_una) against
+    // min(cwnd, peer_window) before allowing a new emit.
+    unsigned int    peer_window;
     TcpOnData       on_data;        // ch29: app-layer hook
     GlThread        glue;
 };
@@ -130,5 +145,11 @@ bool tcp_send_data(Node* node, unsigned int dst_ip_host,
 // Or CLOSE_WAIT -> LAST_ACK if we already received a FIN.
 bool tcp_close(Node* node, unsigned int dst_ip_host,
                unsigned short dst_port);
+
+// ch40: artificially trigger a loss event on the (node, dst_ip,
+// dst_port) TCB. Halves cwnd into ssthresh, drops cwnd to one MSS.
+// Test hook - real impls do this on RTO firing or 3-dup-ACK.
+bool tcp_simulate_loss(Node* node, unsigned int dst_ip_host,
+                       unsigned short dst_port);
 
 #endif

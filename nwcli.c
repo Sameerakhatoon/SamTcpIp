@@ -41,6 +41,7 @@ static int   run_node_tcp_syn_handler(int argc, char** argv);
 static int   run_node_tcp_send_handler(int argc, char** argv);
 static int   run_node_tcp_close_handler(int argc, char** argv);
 static int   run_node_tcp_connect_handler(int argc, char** argv);
+static int   run_node_tcp_loss_handler(int argc, char** argv);
 static int   run_node_udp_big_handler(int argc, char** argv);
 static int   run_node_arp_age_handler(int argc, char** argv);
 static int   run_node_mac_age_handler(int argc, char** argv);
@@ -603,6 +604,35 @@ static int run_node_tcp_close_handler(int argc, char** argv){
         return 1;
     }
     usleep(200 * 1000);
+    return 0;
+}
+
+// ch40: `run node <node> tcp-loss <ip> <dport>` - simulate a
+// loss event on a TCB (halves cwnd into ssthresh, resets to 1
+// SMSS). Real impls fire this on RTO or 3-dup-ACK.
+static int run_node_tcp_loss_handler(int argc, char** argv){
+    if(argc != 3){
+        fprintf(stderr, "run node tcp-loss: expected <node> <ip> <dport>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    unsigned int dst_net = 0;
+    if(inet_pton(AF_INET, argv[1], &dst_net) != 1){
+        fprintf(stderr, "tcp-loss: bad ip\n");
+        return 1;
+    }
+    int dport = atoi(argv[2]);
+    if(dport < 1 || dport > 65535){
+        fprintf(stderr, "tcp-loss: dport out of range\n");
+        return 1;
+    }
+    if(!tcp_simulate_loss(node, htonl(dst_net), (unsigned short)dport)){
+        return 1;
+    }
     return 0;
 }
 
@@ -1200,6 +1230,27 @@ static CliCmd cmd_run_node_tcp_close = {
     .children = run_node_tcp_close_ip_children,
 };
 
+// ch40: tcp-loss simulator. tcp-loss <ip> <dport>
+static CliCmd cmd_run_node_tcp_loss_dport = {
+    .name     = "<dport>",
+    .capture  = true,
+    .handler  = run_node_tcp_loss_handler,
+    .help     = "remote port of the TCB",
+};
+static CliCmd* run_node_tcp_loss_dport_children[] = { &cmd_run_node_tcp_loss_dport, 0 };
+static CliCmd cmd_run_node_tcp_loss_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .help     = "remote IP of the TCB",
+    .children = run_node_tcp_loss_dport_children,
+};
+static CliCmd* run_node_tcp_loss_ip_children[] = { &cmd_run_node_tcp_loss_ip, 0 };
+static CliCmd cmd_run_node_tcp_loss = {
+    .name     = "tcp-loss",
+    .help     = "ch40 simulate a loss event (half cwnd, reset to SMSS)",
+    .children = run_node_tcp_loss_ip_children,
+};
+
 static CliCmd* run_node_name_children[] = {
     &cmd_run_node_resolve,
     &cmd_run_node_ping,
@@ -1212,6 +1263,7 @@ static CliCmd* run_node_name_children[] = {
     &cmd_run_node_tcp_send,
     &cmd_run_node_tcp_close,
     &cmd_run_node_tcp_connect,
+    &cmd_run_node_tcp_loss,
     &cmd_run_node_udp_big,
     &cmd_run_node_arp_age,
     &cmd_run_node_mac_age,
