@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include "Layer2/layer2.h"
 #include "Layer3/layer3.h"
+#include "Layer3/pmtu.h"
 #include "Layer4/udp.h"
 #include "Layer4/tcp.h"
 #include "Layer5/ping.h"
@@ -47,6 +48,9 @@ static int   run_pcap_start_handler(int argc, char** argv);
 static int   run_pcap_stop_handler(int argc, char** argv);
 static int   run_log_level_handler(int argc, char** argv);
 static int   run_log_test_handler(int argc, char** argv);
+static int   run_pmtu_set_handler(int argc, char** argv);
+static int   run_pmtu_show_handler(int argc, char** argv);
+static int   run_pmtu_clear_handler(int argc, char** argv);
 static int   run_tap_open_handler(int argc, char** argv);
 static int   run_tap_close_handler(int argc, char** argv);
 static int   run_tap_attach_handler(int argc, char** argv);
@@ -722,6 +726,35 @@ static int run_log_test_handler(int argc, char** argv){
     return 0;
 }
 
+// ch39: PMTUD cache controls.
+//   run pmtu set <dst-ip> <mtu>   - install / override an entry
+//   run pmtu show                 - dump the cache
+//   run pmtu clear                - wipe all entries (no arg)
+static int run_pmtu_set_handler(int argc, char** argv){
+    if(argc != 2){
+        fprintf(stderr, "run pmtu set: expected <dst-ip> <mtu>\n");
+        return 1;
+    }
+    unsigned int dst_net = 0;
+    if(inet_pton(AF_INET, argv[0], &dst_net) != 1){
+        fprintf(stderr, "run pmtu set: bad ip `%s`\n", argv[0]);
+        return 1;
+    }
+    unsigned int mtu = (unsigned int)atoi(argv[1]);
+    pmtu_install(htonl(dst_net), mtu);
+    return 0;
+}
+static int run_pmtu_show_handler(int argc, char** argv){
+    (void)argc; (void)argv;
+    pmtu_dump();
+    return 0;
+}
+static int run_pmtu_clear_handler(int argc, char** argv){
+    (void)argc; (void)argv;
+    pmtu_clear(0);
+    return 0;
+}
+
 // ch28: run pcap start <file> / run pcap stop
 static int run_pcap_start_handler(int argc, char** argv){
     if(argc != 1){
@@ -1339,6 +1372,48 @@ static CliCmd cmd_run_pcap = {
     .children = run_pcap_children,
 };
 
+// ch39: run pmtu {set <ip> <mtu> | show | clear}
+static CliCmd cmd_run_pmtu_set_mtu = {
+    .name     = "<mtu>",
+    .capture  = true,
+    .handler  = run_pmtu_set_handler,
+    .help     = "discovered path MTU in bytes",
+};
+static CliCmd* run_pmtu_set_mtu_children[] = { &cmd_run_pmtu_set_mtu, 0 };
+static CliCmd cmd_run_pmtu_set_ip = {
+    .name     = "<dst-ip>",
+    .capture  = true,
+    .children = run_pmtu_set_mtu_children,
+    .help     = "destination IP whose path MTU we are setting",
+};
+static CliCmd* run_pmtu_set_ip_children[] = { &cmd_run_pmtu_set_ip, 0 };
+static CliCmd cmd_run_pmtu_set = {
+    .name     = "set",
+    .help     = "install / update a per-destination PMTU",
+    .children = run_pmtu_set_ip_children,
+};
+static CliCmd cmd_run_pmtu_show = {
+    .name     = "show",
+    .handler  = run_pmtu_show_handler,
+    .help     = "dump the PMTU cache",
+};
+static CliCmd cmd_run_pmtu_clear = {
+    .name     = "clear",
+    .handler  = run_pmtu_clear_handler,
+    .help     = "wipe all PMTU cache entries",
+};
+static CliCmd* run_pmtu_children[] = {
+    &cmd_run_pmtu_set,
+    &cmd_run_pmtu_show,
+    &cmd_run_pmtu_clear,
+    0,
+};
+static CliCmd cmd_run_pmtu = {
+    .name     = "pmtu",
+    .help     = "ch39 PMTUD cache controls",
+    .children = run_pmtu_children,
+};
+
 // ch37: run log-level <name> + run log-test
 static CliCmd cmd_run_log_level_name = {
     .name     = "<level>",
@@ -1363,6 +1438,7 @@ static CliCmd* run_children[] = {
     &cmd_run_node,
     &cmd_run_tap,
     &cmd_run_pcap,
+    &cmd_run_pmtu,
     &cmd_run_log_level,
     &cmd_run_log_test,
     0,

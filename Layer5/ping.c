@@ -6,6 +6,8 @@
 #include "../net.h"
 #include "../Layer3/layer3.h"
 #include "../Layer3/icmp.h"
+#include "../Layer3/pmtu.h"
+#include "../Layer3/layer3.h"
 #include "ping.h"
 
 // Forward declarations.
@@ -79,6 +81,29 @@ static void ping_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
     if(in->type == ICMP_ECHO_REPLY){
         printf("Ping reply : %s : seq=%u from %s\n",
                node->node_name, seq_host, src_str);
+        return;
+    }
+    // ch39: RFC 1191 PMTUD. ICMP Type 3 Code 4 = "Fragmentation
+    // Needed, DF set". Body carries next-hop MTU and the orig IP
+    // header (so we know WHICH dst was unreachable). Install the
+    // discovered MTU in the per-dst PMTU cache; the next originate
+    // to that dst will fragment to fit.
+    if(in->type == ICMP_DEST_UNREACH && in->code == ICMP_FRAG_NEEDED){
+        if(payload_size < sizeof(IcmpDestUnreach) + sizeof(IpHdr)){
+            printf("Ping recv : %s : runt Frag-Needed (%zu bytes)\n",
+                   node->node_name, payload_size);
+            return;
+        }
+        IcmpDestUnreach* du = (IcmpDestUnreach*)payload;
+        unsigned short next_mtu = ntohs(du->next_hop_mtu);
+        IpHdr* orig = (IpHdr*)(payload + sizeof(IcmpDestUnreach));
+        char dst_str[16];
+        ip_int_to_str(orig->dst_ip, dst_str);
+        printf("Ping recv : %s : Frag-Needed for %s (next-hop MTU %u)\n",
+               node->node_name, dst_str, next_mtu);
+        if(next_mtu >= sizeof(IpHdr) + 8){    // sanity
+            pmtu_install(orig->dst_ip, next_mtu);
+        }
         return;
     }
     printf("Ping recv : %s : unhandled ICMP type=%u code=%u\n",

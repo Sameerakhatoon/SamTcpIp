@@ -11,6 +11,7 @@ OBJECTS  = build/graph.o \
            build/Layer2/l2switch.o \
            build/Layer3/layer3.o \
            build/Layer3/icmp.o \
+           build/Layer3/pmtu.o \
            build/Layer4/udp.o \
            build/Layer4/tcp.o \
            build/Layer5/ping.o \
@@ -69,6 +70,10 @@ build/Layer3/layer3.o: Layer3/layer3.c Layer3/layer3.h graph.h net.h utils.h com
 build/Layer3/icmp.o: Layer3/icmp.c Layer3/icmp.h utils.h
 	@mkdir -p build/Layer3
 	$(CC) $(CFLAGS) -c Layer3/icmp.c -o build/Layer3/icmp.o
+
+build/Layer3/pmtu.o: Layer3/pmtu.c Layer3/pmtu.h
+	@mkdir -p build/Layer3
+	$(CC) $(CFLAGS) -c Layer3/pmtu.c -o build/Layer3/pmtu.o
 
 build/Layer4/udp.o: Layer4/udp.c Layer4/udp.h Layer3/layer3.h graph.h net.h utils.h gluethread/glthread.h
 	@mkdir -p build/Layer4

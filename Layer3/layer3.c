@@ -11,6 +11,7 @@
 #include "../utils.h"
 #include "../Layer2/layer2.h"
 #include "layer3.h"
+#include "pmtu.h"
 
 // ch12: pin the IPv4 header at exactly 20 bytes (RFC 791).
 // If a future edit reintroduces a `short` where a `char` is
@@ -586,7 +587,15 @@ void demote_packet_to_layer3(Node* node, char* pkt, size_t pkt_size,
     unsigned short id = g_ip_id_next++;
     if(g_ip_id_next == 0) g_ip_id_next = 1;     // avoid 0 = "unset"
 
+    // ch39: PMTUD - if a cached path MTU exists for this dst, it
+    // CAPS the per-fragment IP payload. Cache stores total MTU
+    // (header + payload); subtract sizeof(IpHdr) for the budget.
     size_t per_frag = IP_MAX_FRAG_PAYLOAD;
+    unsigned int cached_mtu = pmtu_lookup(tmpl.dst_ip);
+    if(cached_mtu > sizeof(IpHdr)){
+        size_t pmtu_payload = cached_mtu - sizeof(IpHdr);
+        if(pmtu_payload < per_frag) per_frag = pmtu_payload;
+    }
     // round down to multiple of 8 (the LAST fragment can have any size).
     size_t per_frag_8 = (per_frag / 8) * 8;
     if(per_frag_8 == 0) per_frag_8 = per_frag;
