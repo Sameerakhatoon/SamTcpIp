@@ -186,6 +186,33 @@ unbounded growth, clean exit on Ctrl-C.
 At ch42 we are done. The phrase "userspace TCP/IP stack" is
 true without qualifiers.
 
+## Shipped vs planned (post-mortem)
+
+The plan above was the going-in roadmap. Actual ship order
+diverged - chapters were collapsed where the work was
+smaller than expected, and a few PLAN chapters were
+deliberately deferred when they didn't move the curl needle
+(see commit notes). Real chapter map as shipped:
+
+```
+M1  ch11-21   shipped as planned
+M2  ch22-29   ch24 (rtx) + ch25 (sendq) deferred; sign-off at ch29
+M3  ch30-33   collapsed; sign-off at ch33 (no DHCP/DNS - static
+              config is enough for the curl-both-ways goal)
+M4  ch34       only IP frag shipped; PMTUD/cwnd/peer-window
+              deferred (real-wire is good enough without them
+              for the test rig)
+M5  ch35-38   aging, signals, log levels, sign-off
+```
+
+Every shipped chapter has docs/NN-*.md + tests/NN-*.sh.
+Deferrals are documented in each chapter's "what's NOT here"
+section; see also the PLAN out-of-scope list below for what
+stays out of scope.
+
+**Milestone 5 signed off at ch38.** Both directions of curl
+work; stack survives long runs and exits cleanly. MVP done.
+
 ## Explicitly out of scope (Phase 6+, post-MVP)
 
 If we want any of these AFTER ch42, they are separate
