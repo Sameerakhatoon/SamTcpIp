@@ -42,6 +42,8 @@ static int   run_node_tcp_send_handler(int argc, char** argv);
 static int   run_node_tcp_close_handler(int argc, char** argv);
 static int   run_node_tcp_connect_handler(int argc, char** argv);
 static int   run_node_tcp_loss_handler(int argc, char** argv);
+static int   run_node_tcp_send_big_handler(int argc, char** argv);
+static int   run_tcp_rwnd_handler(int argc, char** argv);
 static int   run_node_udp_big_handler(int argc, char** argv);
 static int   run_node_arp_age_handler(int argc, char** argv);
 static int   run_node_mac_age_handler(int argc, char** argv);
@@ -601,6 +603,56 @@ static int run_node_tcp_close_handler(int argc, char** argv){
         return 1;
     }
     if(!tcp_close(node, htonl(dst_net), (unsigned short)dport)){
+        return 1;
+    }
+    usleep(200 * 1000);
+    return 0;
+}
+
+// ch41: `run tcp-rwnd <bytes>` - set the advertised receive
+// window. Used to gate the peer-window send check.
+static int run_tcp_rwnd_handler(int argc, char** argv){
+    if(argc != 1){
+        fprintf(stderr, "run tcp-rwnd: expected <bytes>\n");
+        return 1;
+    }
+    int rwnd = atoi(argv[0]);
+    if(rwnd < 0 || rwnd > 65535){
+        fprintf(stderr, "run tcp-rwnd: out of range\n");
+        return 1;
+    }
+    tcp_set_rwnd((unsigned short)rwnd);
+    return 0;
+}
+
+// ch41: `run node <node> tcp-send-big <ip> <dport> <bytes>` -
+// send N bytes of filler. Lets tests drive a payload bigger than
+// the peer's advertised window to exercise the send-gate.
+static int run_node_tcp_send_big_handler(int argc, char** argv){
+    if(argc != 4){
+        fprintf(stderr, "run node tcp-send-big: expected <node> <ip> <dport> <bytes>\n");
+        return 1;
+    }
+    Node* node = find_node_by_name(argv[0]);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", argv[0]);
+        return 1;
+    }
+    unsigned int dst_net = 0;
+    if(inet_pton(AF_INET, argv[1], &dst_net) != 1){
+        fprintf(stderr, "tcp-send-big: bad ip\n");
+        return 1;
+    }
+    int dport = atoi(argv[2]);
+    int nbytes = atoi(argv[3]);
+    if(nbytes < 1 || nbytes > 1400){
+        fprintf(stderr, "tcp-send-big: nbytes out of range (1..1400)\n");
+        return 1;
+    }
+    char buf[1400];
+    memset(buf, 'X', (size_t)nbytes);
+    if(!tcp_send_data(node, htonl(dst_net), (unsigned short)dport,
+                      buf, (size_t)nbytes)){
         return 1;
     }
     usleep(200 * 1000);
@@ -1230,6 +1282,34 @@ static CliCmd cmd_run_node_tcp_close = {
     .children = run_node_tcp_close_ip_children,
 };
 
+// ch41: tcp-send-big <ip> <dport> <bytes>
+static CliCmd cmd_run_node_tcp_send_big_bytes = {
+    .name     = "<bytes>",
+    .capture  = true,
+    .handler  = run_node_tcp_send_big_handler,
+    .help     = "payload size in bytes (1..1400)",
+};
+static CliCmd* run_node_tcp_send_big_bytes_children[] = { &cmd_run_node_tcp_send_big_bytes, 0 };
+static CliCmd cmd_run_node_tcp_send_big_dport = {
+    .name     = "<dport>",
+    .capture  = true,
+    .help     = "remote port",
+    .children = run_node_tcp_send_big_bytes_children,
+};
+static CliCmd* run_node_tcp_send_big_dport_children[] = { &cmd_run_node_tcp_send_big_dport, 0 };
+static CliCmd cmd_run_node_tcp_send_big_ip = {
+    .name     = "<ip>",
+    .capture  = true,
+    .help     = "remote IP",
+    .children = run_node_tcp_send_big_dport_children,
+};
+static CliCmd* run_node_tcp_send_big_ip_children[] = { &cmd_run_node_tcp_send_big_ip, 0 };
+static CliCmd cmd_run_node_tcp_send_big = {
+    .name     = "tcp-send-big",
+    .help     = "ch41 send N bytes of filler (probes window gate)",
+    .children = run_node_tcp_send_big_ip_children,
+};
+
 // ch40: tcp-loss simulator. tcp-loss <ip> <dport>
 static CliCmd cmd_run_node_tcp_loss_dport = {
     .name     = "<dport>",
@@ -1264,6 +1344,7 @@ static CliCmd* run_node_name_children[] = {
     &cmd_run_node_tcp_close,
     &cmd_run_node_tcp_connect,
     &cmd_run_node_tcp_loss,
+    &cmd_run_node_tcp_send_big,
     &cmd_run_node_udp_big,
     &cmd_run_node_arp_age,
     &cmd_run_node_mac_age,
@@ -1466,6 +1547,20 @@ static CliCmd cmd_run_pmtu = {
     .children = run_pmtu_children,
 };
 
+// ch41: run tcp-rwnd <bytes>
+static CliCmd cmd_run_tcp_rwnd_bytes = {
+    .name     = "<bytes>",
+    .capture  = true,
+    .handler  = run_tcp_rwnd_handler,
+    .help     = "advertised receive window in bytes (0..65535)",
+};
+static CliCmd* run_tcp_rwnd_bytes_children[] = { &cmd_run_tcp_rwnd_bytes, 0 };
+static CliCmd cmd_run_tcp_rwnd = {
+    .name     = "tcp-rwnd",
+    .help     = "ch41 set advertised receive window",
+    .children = run_tcp_rwnd_bytes_children,
+};
+
 // ch37: run log-level <name> + run log-test
 static CliCmd cmd_run_log_level_name = {
     .name     = "<level>",
@@ -1491,6 +1586,7 @@ static CliCmd* run_children[] = {
     &cmd_run_tap,
     &cmd_run_pcap,
     &cmd_run_pmtu,
+    &cmd_run_tcp_rwnd,
     &cmd_run_log_level,
     &cmd_run_log_test,
     0,

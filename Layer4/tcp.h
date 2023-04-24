@@ -152,4 +152,8 @@ bool tcp_close(Node* node, unsigned int dst_ip_host,
 bool tcp_simulate_loss(Node* node, unsigned int dst_ip_host,
                        unsigned short dst_port);
 
+// ch41: set the receive-window value we advertise in every
+// outbound segment. Defaults to 1024.
+void tcp_set_rwnd(unsigned short rwnd);
+
 #endif

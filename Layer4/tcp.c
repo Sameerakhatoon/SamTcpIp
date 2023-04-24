@@ -51,6 +51,16 @@ static unsigned short tcp_alloc_ephemeral_port(Node* node, unsigned int local_ip
                                                unsigned int remote_ip,
                                                unsigned short remote_port);
 
+// ch41: receive-side window we advertise in every outbound
+// segment. Per-process for now. CLI `run tcp-rwnd <bytes>` can
+// drop this to test the peer-window send-gate.
+static unsigned short g_tcp_rwnd = 1024;
+void tcp_set_rwnd(unsigned short rwnd){
+    g_tcp_rwnd = rwnd;
+    printf("TCP rwnd : set to %u (will advertise on next segment)\n",
+           g_tcp_rwnd);
+}
+
 // One global TCB list. Same structure as udp_bindings.
 static GlThread g_tcbs;
 static bool     g_tcbs_inited = false;
@@ -215,7 +225,7 @@ static void send_synack(Tcb* tcb, unsigned short peer_mss){
     hdr->ack      = htonl(tcb->rcv_nxt);
     hdr->data_off_rsvd = (6 << 4);     // 6 * 4 = 24 bytes header
     hdr->flags    = TCP_SYN | TCP_ACK;
-    hdr->window   = htons(1024);
+    hdr->window   = htons(g_tcp_rwnd);
     hdr->checksum = 0;
     hdr->urg_ptr  = 0;
     // MSS option (kind=2 len=4 mss=1460 default for ethernet).
@@ -544,7 +554,7 @@ void tcp_send_syn(Node* node, unsigned int dst_ip_host,
     hdr->ack      = 0;
     hdr->data_off_rsvd = (6 << 4);
     hdr->flags    = TCP_SYN;
-    hdr->window   = htons(1024);
+    hdr->window   = htons(g_tcp_rwnd);
     hdr->checksum = 0;
     hdr->urg_ptr  = 0;
     seg[20] = 2; seg[21] = 4;
@@ -573,7 +583,7 @@ static void send_fin_ack(Tcb* tcb){
     hdr->ack      = htonl(tcb->rcv_nxt);
     hdr->data_off_rsvd = (5 << 4);
     hdr->flags    = TCP_FIN | TCP_ACK;
-    hdr->window   = htons(1024);
+    hdr->window   = htons(g_tcp_rwnd);
     hdr->checksum = 0;
     hdr->urg_ptr  = 0;
 
@@ -629,7 +639,7 @@ static void send_bare_ack(Tcb* tcb){
     hdr->ack      = htonl(tcb->rcv_nxt);
     hdr->data_off_rsvd = (5 << 4);     // 20 bytes
     hdr->flags    = TCP_ACK;
-    hdr->window   = htons(1024);
+    hdr->window   = htons(g_tcp_rwnd);
     hdr->checksum = 0;
     hdr->urg_ptr  = 0;
 
@@ -671,7 +681,7 @@ bool tcp_send_data(Node* node, unsigned int dst_ip_host,
                dst_port);
         return false;
     }
-    if(payload_size > 150){
+    if(payload_size > 1400){
         printf("TCP send : %s : payload too big (%zu)\n",
                node->node_name, payload_size);
         return false;
@@ -693,7 +703,7 @@ bool tcp_send_data(Node* node, unsigned int dst_ip_host,
                found->cwnd, found->peer_window);
         return false;
     }
-    unsigned char seg[256] = {0};
+    unsigned char seg[1500] = {0};
     TcpHdr* hdr = (TcpHdr*)seg;
     hdr->src_port = htons(found->local_port);
     hdr->dst_port = htons(found->remote_port);
@@ -701,7 +711,7 @@ bool tcp_send_data(Node* node, unsigned int dst_ip_host,
     hdr->ack      = htonl(found->rcv_nxt);
     hdr->data_off_rsvd = (5 << 4);
     hdr->flags    = TCP_PSH | TCP_ACK;
-    hdr->window   = htons(1024);
+    hdr->window   = htons(g_tcp_rwnd);
     hdr->checksum = 0;
     hdr->urg_ptr  = 0;
     memcpy(seg + 20, payload, payload_size);
