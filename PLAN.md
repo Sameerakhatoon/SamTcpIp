@@ -199,10 +199,11 @@ M1  ch11-21   shipped as planned
 M2  ch22-29   ch24 (rtx) + ch25 (sendq) deferred; sign-off at ch29
 M3  ch30-33   collapsed; sign-off at ch33 (no DHCP/DNS - static
               config is enough for the curl-both-ways goal)
-M4  ch34       only IP frag shipped; PMTUD/cwnd/peer-window
-              deferred (real-wire is good enough without them
-              for the test rig)
+M4  ch34       IP frag + reassembly only at first pass
 M5  ch35-38   aging, signals, log levels, sign-off
+M4* ch39-42   second M4 pass: PMTUD path cache (ch39), TCP cwnd
+              + slow start (ch40), TCP peer-window enforcement
+              (ch41), M4 sign-off (ch42)
 ```
 
 Every shipped chapter has docs/NN-*.md + tests/NN-*.sh.
@@ -210,8 +211,11 @@ Deferrals are documented in each chapter's "what's NOT here"
 section; see also the PLAN out-of-scope list below for what
 stays out of scope.
 
-**Milestone 5 signed off at ch38.** Both directions of curl
-work; stack survives long runs and exits cleanly. MVP done.
+**Milestone 5 signed off at ch38.** **Milestone 4 (now) signed
+off at ch42.** Both directions of curl work; stack survives
+long runs and exits cleanly; sender ramps up safely under cwnd
++ peer-window; PMTUD shrinks fragment threshold on discovered
+narrow paths. MVP done.
 
 ## Explicitly out of scope (Phase 6+, post-MVP)
 
