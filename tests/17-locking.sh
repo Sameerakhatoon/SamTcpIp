@@ -9,7 +9,7 @@
 #
 # This test is regression-style. ch17 is invisible at the test
 # log level - it just makes correctness hold under concurrency.
-# The PLAN.md test rule still requires one test per chapter:
+# The test rule still requires one test per chapter:
 #
 #   1. Stress the loopback path with rapid back-to-back pings +
 #      UDP to demonstrate no lock-induced deadlock and no

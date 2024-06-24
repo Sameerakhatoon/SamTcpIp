@@ -196,7 +196,7 @@ static void udp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
 
     UdpBinding* b = udp_lookup_binding(node, dst_port);
     if(!b){
-        // Per PLAN.md rule 1, no ICMP Port-Unreach emit yet. Just
+        // Only what we use: no ICMP Port-Unreach emit yet. Just
         // log + drop. The chapter that ships ICMP errors will wire
         // this point.
         printf("UDP recv : %s : no binding for port %u (drop)\n",

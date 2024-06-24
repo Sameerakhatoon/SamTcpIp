@@ -14,7 +14,7 @@
 //   - tcp_listen(node, port) to install a passive socket.
 //   - Manual tcp_send_syn helper + CLI for testing without curl.
 //
-// Per PLAN.md rule 1: data transfer, retransmission, congestion
+// Only what we use: data transfer, retransmission, congestion
 // control, RST emit, FIN orderly close all come in their own
 // chapters. ch22 is just "we can agree to talk."
 

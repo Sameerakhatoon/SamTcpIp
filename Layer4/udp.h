@@ -14,11 +14,11 @@
 //
 // Byte-order: UdpHdr fields are NETWORK byte order on the wire
 // (same convention ch11 set for ICMP). IP src_ip / dst_ip remain
-// HOST byte order per PLAN.md rule 3 (closes at TAP boundary in
+// HOST byte order for now (closes at TAP boundary in
 // ch18). The pseudo-header feeds them in HBO; receiver does the
 // same; self-consistency holds on the simulated wire.
 //
-// Per PLAN.md rule 1: we ship only what's needed for ch13. UDP
+// We ship only what's needed for ch13. UDP
 // Port-Unreach ICMP error emit + RFC 768's "transmitted csum = 0
 // disables verify" special case come when their chapters need
 // them.

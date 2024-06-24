@@ -9,11 +9,11 @@
 //   - icmp_checksum(): 16-bit ones-complement sum, RFC 1071
 //   - constants: ICMP_PROTO=1 (IANA), ECHO_REQUEST=8, ECHO_REPLY=0
 //
-// Per PLAN.md rule 1, we ship ONLY what we use. Error message
+// We ship ONLY what we use. Error message
 // constants (Dest Unreach, Time Exceeded, Frag Needed, Redirect)
 // come when we ship those errors, not pre-emptively.
 //
-// Byte-order note (PLAN.md rule 3):
+// Byte-order note:
 //   ICMP fields (identifier, sequence, checksum) are NETWORK byte
 //   order on the real wire. The course's IP src_ip / dst_ip have
 //   lived in HOST byte order since ch5. ch11 honours real ICMP

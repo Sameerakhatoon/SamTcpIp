@@ -10,7 +10,7 @@
 # The simulator-side proof: ESTABLISHED on both endpoints with
 # R1 as transparent transit hop.
 #
-# Skipped, per PLAN.md rule 1:
+# Skipped, per the scope rule:
 #   - ICMP error receive (Dest Unreach -> abort pending)
 #   - DHCP client (operator does manual ip config under root)
 #   - DNS client (operator uses IP literal)

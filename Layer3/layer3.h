@@ -29,7 +29,7 @@
 //
 // Byte-order convention: multi-byte fields are in HOST byte
 // order on our simulated wire, preserved from the course. Real
-// RFC 791 uses network byte order. PLAN.md rule 3 says we close
+// RFC 791 uses network byte order. The byte-order rule says we close
 // this at the TAP boundary in Milestone 1 ch18.
 typedef struct IpHdr {
     unsigned int   version    : 4;   // 4 for IPv4

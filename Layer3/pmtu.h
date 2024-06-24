@@ -26,7 +26,7 @@ void          pmtu_dump(void);
 
 // ---- RFC 792 / RFC 1191 ICMP error wire constants -----------------
 //
-// We didn't ship these in ch11 (PLAN.md rule 1: only what we use).
+// We didn't ship these in ch11 (only what we use).
 // Now we use them.
 #define ICMP_DEST_UNREACH     3
 #define ICMP_FRAG_NEEDED      4

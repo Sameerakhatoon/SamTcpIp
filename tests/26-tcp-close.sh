@@ -5,10 +5,10 @@
 # FIN_WAIT_2, CLOSE_WAIT, LAST_ACK. TIME_WAIT collapsed to CLOSED
 # (no 2*MSL timer in this scope; documented).
 #
-# ch24 (retransmit) and ch25 (send-queue) skipped: PLAN.md rule 1
+# ch24 (retransmit) and ch25 (send-queue) skipped by the scope rule
 # - they are wire-quality polish for lossy networks; curl on a
 # localhost TAP wire does not need them for the MVP. The plan
-# acknowledges this jump and a future loop can backfill.
+# acknowledges this jump and a later chapter can backfill.
 #
 # Test plan: full request-response-close cycle.
 #   1. Handshake.

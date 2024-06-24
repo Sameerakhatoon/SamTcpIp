@@ -58,7 +58,7 @@ long tap_recv_raw(int fd, void* buf, size_t max);
 // thread runs until tap_detach() is called.
 //
 // `node` is the Node the userspace stack runs as (Phase 6+
-// reduces this to "the one Node" per PLAN.md rule 4; ch15 keeps
+// reduces this to "the one Node"; ch15 keeps
 // the parameter for symmetry with the simulator).
 //
 // Returns 0 on success, -1 on error (already attached, bad

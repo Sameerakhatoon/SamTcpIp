@@ -99,7 +99,7 @@ long tap_recv_raw(int fd, void* buf, size_t max){
 
 // ---- ch15: attach / detach + recv thread --------------------------------
 
-// Single-instance state. Per PLAN.md rule 4 the userspace stack
+// Single-instance state. The userspace stack
 // is one Node; one TAP is enough.
 static int              g_tap_fd     = -1;
 static Node*            g_tap_node   = NULL;

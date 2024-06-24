@@ -233,10 +233,10 @@ int send_pkt_flood(Node* node, Interface* exempted_intf, char* pkt, size_t pkt_s
 // rather not invent a per-table lock-order today. Single because
 // our throughput target is "manual ping", not millions of pps.
 //
-// PLAN.md rule 1: this is needed for curl-both-ways. Without it
+// This is needed for curl-both-ways. Without it
 // the receive path races as soon as the TAP fires a frame while
-// the simulator wire is also delivering one. Documented in
-// docs/17-locking.md.
+// the simulator wire is also delivering one. One lock for the whole
+// stack is enough at this scale (ch17).
 static pthread_mutex_t       g_pkt_recv_mtx;
 static pthread_once_t        g_pkt_recv_mtx_once = PTHREAD_ONCE_INIT;
 static void init_pkt_recv_mtx(void){
