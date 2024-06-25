@@ -80,6 +80,11 @@ void interface_assign_mac_address(Interface* intf){
     unsigned int seed = hash_code(intf, sizeof(*intf));
     memset(IF_MAC(intf), 0, 6);
     memcpy(IF_MAC(intf), &seed, sizeof(unsigned int));
+    // A real peer (the host kernel on the TAP side) rejects a
+    // multicast source MAC. Force byte 0 to unicast (I/G bit 0
+    // clear) and locally administered (U/L bit 1 set), the IEEE
+    // convention for software-assigned addresses.
+    IF_MAC(intf)[0] = (char)(((unsigned char)IF_MAC(intf)[0] & 0xFE) | 0x02);
 }
 
 bool node_set_device_type(Node* node, unsigned int flag){
