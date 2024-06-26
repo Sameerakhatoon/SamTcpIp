@@ -241,10 +241,10 @@ static void send_synack(Tcb* tcb, unsigned short peer_mss){
            (tcb->remote_ip >> 24) & 0xFF, (tcb->remote_ip >> 16) & 0xFF,
            (tcb->remote_ip >> 8)  & 0xFF,  tcb->remote_ip        & 0xFF,
            tcb->remote_port);
+    // Our SYN takes one sequence number; account it before it leaves.
+    tcb->snd_nxt = tcb->iss + 1;
     demote_packet_to_layer3(tcb->node, (char*)seg, 24,
                             IP_PROTO_TCP, tcb->remote_ip);
-    // Our SYN takes one sequence number.
-    tcb->snd_nxt = tcb->iss + 1;
 }
 
 static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
@@ -594,9 +594,12 @@ static void send_fin_ack(Tcb* tcb){
            (tcb->remote_ip >> 24) & 0xFF, (tcb->remote_ip >> 16) & 0xFF,
            (tcb->remote_ip >> 8)  & 0xFF,  tcb->remote_ip        & 0xFF,
            tcb->remote_port);
+    // Advance snd_nxt BEFORE the FIN leaves: the peer's ACK can come
+    // back on the receive thread before demote returns, and it must
+    // find ack == snd_nxt (else FIN_WAIT_1 never moves on).
+    tcb->snd_nxt += 1;
     demote_packet_to_layer3(tcb->node, (char*)seg, 20,
                             IP_PROTO_TCP, tcb->remote_ip);
-    tcb->snd_nxt += 1;
 }
 
 // ch27: build + send a bare RST. No options; 20-byte header.
@@ -724,9 +727,11 @@ bool tcp_send_data(Node* node, unsigned int dst_ip_host,
            (found->remote_ip >> 24) & 0xFF, (found->remote_ip >> 16) & 0xFF,
            (found->remote_ip >> 8)  & 0xFF,  found->remote_ip        & 0xFF,
            found->remote_port);
+    // Same ordering rule as send_fin_ack: account the bytes before
+    // they can be ACKed.
+    found->snd_nxt += payload_size;
     demote_packet_to_layer3(node, (char*)seg, seg_size,
                             IP_PROTO_TCP, dst_ip_host);
-    found->snd_nxt += payload_size;
     return true;
 }
 
