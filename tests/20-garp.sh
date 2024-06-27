@@ -34,7 +34,9 @@ assert_contains "$out_cfg" "GARP : R0_re : announcing 10.0.0.1 on eth0/0" "GARP 
 
 # 3. Root: TAP send carries the GARP.
 if [ "$(id -u)" -eq 0 ]; then
-    out_root="$(printf 'run tap attach R0_re samtap0 eth0/0\nrun node R0_re arp-announce\nrun tap detach\nquit\n' | ./testapp)"
+    # ifup first: the kernel returns EIO for writes to a TAP whose
+    # interface is still down (ch18 added ifup after this test).
+    out_root="$(printf 'run tap attach R0_re samtap0 eth0/0\nrun tap ifup samtap0\nrun node R0_re arp-announce\nrun tap detach\nquit\n' | ./testapp)"
     assert_contains "$out_root" "GARP : R0_re : announcing 20.1.1.1 on eth0/0" "root: GARP fired"
     # The GARP emit goes through send_pkt_out -> TAP, logged as TAP send.
     n_tap=$(printf '%s\n' "$out_root" | grep -c '^TAP send : ' || true)

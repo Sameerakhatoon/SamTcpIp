@@ -26,8 +26,10 @@
 . "$(dirname "$0")/lib.sh"
 
 if [ "$(id -u)" -eq 0 ]; then
-    # Root path - the behavior change is visible.
-    out_tap="$(printf 'run tap attach R0_re samtap0 eth0/0\nrun node R0_re ping 20.1.1.2\nrun tap detach\nquit\n' | ./testapp)"
+    # Root path - the behavior change is visible. ifup first: the
+    # kernel returns EIO for writes to a TAP whose interface is
+    # still down (ch18 added ifup after this test).
+    out_tap="$(printf 'run tap attach R0_re samtap0 eth0/0\nrun tap ifup samtap0\nrun node R0_re ping 20.1.1.2\nrun tap detach\nquit\n' | ./testapp)"
 
     # Positive: send_pkt_out routed through TAP.
     n_tap_send=$(printf '%s\n' "$out_tap" | grep -c '^TAP send : .* bytes via R0_re/eth0/0' || true)
