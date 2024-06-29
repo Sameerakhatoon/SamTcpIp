@@ -6,75 +6,80 @@
 // build broadcast requests, parse replies, and cache the
 // IP -> (MAC, OIF) bindings.
 
+#include <arpa/inet.h>
 #include <stdbool.h>
 #include <string.h>
 #include "../graph.h"
 #include "../gluethread/glthread.h"
 #include "../net.h"
 
-// Ether-type / opcode constants. ARP_MSG is the ether-type for ARP
-// frames; the per-packet op_code distinguishes request from reply.
+// Ether-type / opcode constants (host-order values). On the wire
+// every multi-byte field is NETWORK byte order: writers htons(),
+// readers ntohs(). The course had ARP_MSG as decimal 806 written
+// in host order, which a real peer reads as EtherType 0x2603.
 #define ARP_BROAD_REQ   1
 #define ARP_REPLY       2
-#define ARP_MSG         806
+#define ARP_MSG         0x0806     // ether-type for ARP
 #define IP_HDR_TYPE     0x0800     // ether-type for IPv4
+#define ARP_HW_ETHERNET 1
 #define BROADCAST_MAC   0xFFFFFFFFFFFFULL
+
+// Largest L3 payload one frame carries (Ethernet MTU).
+#define ETH_MAX_PAYLOAD 1500
 
 // All on-wire structs packed so members sit at byte-tight offsets.
 #pragma pack(push, 1)
 
+// RFC 826 ARP for IPv4 over Ethernet: 28 bytes, network byte order.
 typedef struct ArpHdr {
-    short        hw_type;            // 1 for ethernet
-    short        proto_type;         // 0x0800 for IPv4
-    char         hw_addr_len;        // 6 for MAC
-    char         proto_addr_len;     // 4 for IPv4
-    short        op_code;            // request or reply
-    MacAddr      src_mac;            // sender hardware addr
-    unsigned int src_ip;             // sender protocol addr
-    MacAddr      dst_mac;            // target hardware addr (zero in a request)
-    unsigned int dst_ip;             // target protocol addr
+    unsigned short hw_type;          // htons(1) for ethernet
+    unsigned short proto_type;       // htons(0x0800) for IPv4
+    unsigned char  hw_addr_len;      // 6 for MAC
+    unsigned char  proto_addr_len;   // 4 for IPv4
+    unsigned short op_code;          // htons(request or reply)
+    MacAddr        src_mac;          // sender hardware addr
+    unsigned int   src_ip;           // sender protocol addr (NBO)
+    MacAddr        dst_mac;          // target hardware addr (zero in a request)
+    unsigned int   dst_ip;           // target protocol addr (NBO)
 } ArpHdr;
 
+// 14-byte Ethernet II header + payload buffer. The FCS is not part
+// of what we read or write: TAP neither delivers nor expects it,
+// and real NICs compute it in hardware. Frames go out as
+// ETH_HDR_SIZE_EXCL_PAYLOAD + payload bytes, never sizeof().
 typedef struct EthernetHdr {
-    MacAddr      dst_mac;
-    MacAddr      src_mac;
-    short        type;
-    char         payload[248];       // simplified: max we handle is the ARP
-    unsigned int FCS;                // unused; kept for layout
+    MacAddr        dst_mac;
+    MacAddr        src_mac;
+    unsigned short type;             // NBO
+    char           payload[ETH_MAX_PAYLOAD];
 } EthernetHdr;
 
 // ch7: 802.1Q VLAN tag - 4 bytes spliced between src_mac and type
-// in a tagged frame. Bit-fields packed into the 16-bit tci word.
+// in a tagged frame. TCI = PCP(3) | DEI(1) | VID(12), one NBO word
+// (bit-fields have compiler-defined order, so we mask instead).
 #define VLAN_8021Q_PROTO 0x8100
+#define VLAN_VID_MASK    0x0FFF
 
 typedef struct Vlan8021qHdr {
-    short tpid;             // == 0x8100 in a tagged frame
-    short tci_pcp : 3;      // priority code point (unused here)
-    short tci_dei : 1;      // drop-eligible indicator (unused)
-    short tci_vid : 12;     // 12-bit VLAN ID 1..4094
+    unsigned short tpid;             // htons(0x8100) in a tagged frame
+    unsigned short tci;              // NBO: pcp<<13 | dei<<12 | vid
 } Vlan8021qHdr;
 
 typedef struct VlanEthernetHdr {
-    MacAddr      dst_mac;
-    MacAddr      src_mac;
-    Vlan8021qHdr vlan_8021q_hdr;
-    short        type;
-    char         payload[248];
-    unsigned int FCS;
+    MacAddr        dst_mac;
+    MacAddr        src_mac;
+    Vlan8021qHdr   vlan_8021q_hdr;
+    unsigned short type;             // NBO
+    char           payload[ETH_MAX_PAYLOAD];
 } VlanEthernetHdr;
 
 #pragma pack(pop)
 
-// Sizes excluding payload. FCS sits AFTER payload bytes, so we
-// subtract only the payload[].
-#define ETH_HDR_SIZE_EXCL_PAYLOAD       (sizeof(EthernetHdr)     - 248)
-#define VLAN_ETH_HDR_SIZE_EXCL_PAYLOAD  (sizeof(VlanEthernetHdr) - 248)
+_Static_assert(sizeof(ArpHdr) == 28, "RFC 826 ARP (IPv4/Ethernet) must be 28 bytes");
 
-// FCS lives at `payload + payload_size`.
-#define ETH_FCS(eth_ptr, payload_size) \
-    (*(unsigned int*)((char*)((eth_ptr)->payload) + (payload_size)))
-#define VLAN_ETH_FCS(veth_ptr, payload_size) \
-    (*(unsigned int*)((char*)((veth_ptr)->payload) + (payload_size)))
+// Header sizes on the wire: 14 untagged, 18 tagged.
+#define ETH_HDR_SIZE_EXCL_PAYLOAD       (sizeof(EthernetHdr)     - ETH_MAX_PAYLOAD)
+#define VLAN_ETH_HDR_SIZE_EXCL_PAYLOAD  (sizeof(VlanEthernetHdr) - ETH_MAX_PAYLOAD)
 
 // Bytes 13..14 of any frame: in an untagged frame those are the
 // ether-type; in a tagged frame they are the tpid (0x8100). Test
@@ -82,14 +87,28 @@ typedef struct VlanEthernetHdr {
 static inline Vlan8021qHdr* is_pkt_vlan_tagged(EthernetHdr* eth){
     Vlan8021qHdr* v =
         (Vlan8021qHdr*)((char*)eth + (sizeof(MacAddr) * 2));
-    if(v->tpid == (short)VLAN_8021Q_PROTO){
+    if(ntohs(v->tpid) == VLAN_8021Q_PROTO){
         return v;
     }
     return 0;
 }
 
 static inline unsigned int GET_802_1Q_VLAN_ID(Vlan8021qHdr* v){
-    return (unsigned int)v->tci_vid;
+    return (unsigned int)(ntohs(v->tci) & VLAN_VID_MASK);
+}
+
+static inline void SET_802_1Q_VLAN_ID(Vlan8021qHdr* v, unsigned int vlan_id){
+    unsigned short tci = ntohs(v->tci);
+    tci = (unsigned short)((tci & ~VLAN_VID_MASK) | (vlan_id & VLAN_VID_MASK));
+    v->tci = htons(tci);
+}
+
+// EtherType of the frame in host order, looking past a VLAN tag.
+static inline unsigned short GET_ETHERNET_TYPE(EthernetHdr* eth){
+    if(is_pkt_vlan_tagged(eth)){
+        return ntohs(((VlanEthernetHdr*)eth)->type);
+    }
+    return ntohs(eth->type);
 }
 
 // Tagged + untagged share dst_mac/src_mac. The payload sits at

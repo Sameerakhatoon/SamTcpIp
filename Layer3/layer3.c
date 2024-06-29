@@ -386,18 +386,18 @@ static void layer3_pkt_push_down_to_layer2_for_l2routing(
         return;
     }
 
-    // Encap. Payload (IP datagram) must fit in our 248-byte payload[].
-    if(pkt_size > sizeof(((EthernetHdr*)0)->payload)){
+    // Encap. The IP datagram must fit one Ethernet payload (1500).
+    if(pkt_size > ETH_MAX_PAYLOAD){
         printf("L3 send drop : %s : pkt too big (%zu)\n", node->node_name, pkt_size);
         return;
     }
     EthernetHdr* eth = calloc(1, sizeof(EthernetHdr));
     memcpy(eth->dst_mac.mac, arp->mac_addr.mac, sizeof(MacAddr));
     memcpy(eth->src_mac.mac, IF_MAC(oif),       sizeof(MacAddr));
-    eth->type = IP_HDR_TYPE;
+    eth->type = htons(IP_HDR_TYPE);
     memcpy(eth->payload, pkt, pkt_size);
-    eth->FCS = 0;
 
+    // 14-byte header + datagram; no FCS (TAP / NIC owns it).
     send_pkt_out((char*)eth, ETH_HDR_SIZE_EXCL_PAYLOAD + pkt_size, oif);
     free(eth);
 }

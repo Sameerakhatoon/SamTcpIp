@@ -127,10 +127,10 @@ int arp_age(ArpTable* arp_table, long threshold_ms){
 }
 
 void arp_table_update_from_arp_reply(ArpTable* arp_table, ArpHdr* arp_hdr, Interface* iif){
-    assert(arp_hdr->op_code == ARP_REPLY);
-    ArpEntry*    e      = calloc(1, sizeof(ArpEntry));
-    unsigned int src_ip = htonl(arp_hdr->src_ip);
-    inet_ntop(AF_INET, &src_ip, e->ip_addr.ip_addr, 16);
+    assert(ntohs(arp_hdr->op_code) == ARP_REPLY);
+    ArpEntry* e = calloc(1, sizeof(ArpEntry));
+    // src_ip is already network order on the wire.
+    inet_ntop(AF_INET, &arp_hdr->src_ip, (char*)e->ip_addr.ip_addr, 16);
     e->ip_addr.ip_addr[15] = '\0';
     memcpy(e->mac_addr.mac, arp_hdr->src_mac.mac, sizeof(MacAddr));
     strncpy(e->oif_name, iif->if_name, IF_NAME_SIZE);
@@ -155,13 +155,24 @@ void dump_arp_table(ArpTable* arp_table){
 
 // ---- ARP send ------------------------------------------------------------
 
+// Fill the fixed part of an RFC 826 ARP header (network byte order).
+static void arp_fill_common(ArpHdr* arp, unsigned short op){
+    arp->hw_type        = htons(ARP_HW_ETHERNET);
+    arp->proto_type     = htons(IP_HDR_TYPE);
+    arp->hw_addr_len    = sizeof(MacAddr);
+    arp->proto_addr_len = 4;
+    arp->op_code        = htons(op);
+}
+
+// On-wire size of an untagged ARP frame: 14 + 28 = 42 bytes.
+#define ARP_FRAME_SIZE  (ETH_HDR_SIZE_EXCL_PAYLOAD + sizeof(ArpHdr))
+
 // Build + send a broadcast ARP request for `ip_addr` out of `oif`.
 // If `oif` is NULL, look one up by subnet match against the node.
 //
-// Byte-order quirk preserved from the reference: src_ip / dst_ip
-// are written with `htonl` AFTER inet_pton, so the wire value ends
-// up in *host* byte order. The receiver `htonl`s again to recover.
-// Consistent on loopback - would need fixing for a real peer.
+// Wire format is real RFC 826: 16-bit fields htons'd, IPs straight
+// from inet_pton (already network order). The course stored IPs in
+// host order, which only worked between two copies of this stack.
 void send_arp_broadcast_request(Node* node, Interface* oif, char* ip_addr){
     if(!oif){
         oif = node_get_matching_subnet_interface(node, ip_addr);
@@ -178,23 +189,16 @@ void send_arp_broadcast_request(Node* node, Interface* oif, char* ip_addr){
 
     layer2_fill_with_broadcast_mac((char*)eth->dst_mac.mac);
     memcpy(eth->src_mac.mac, IF_MAC(oif), sizeof(MacAddr));
-    eth->type = ARP_MSG;
+    eth->type = htons(ARP_MSG);
 
     ArpHdr* arp = (ArpHdr*)eth->payload;
-    arp->hw_type        = 1;
-    arp->proto_type     = 0x0800;
-    arp->hw_addr_len    = sizeof(MacAddr);
-    arp->proto_addr_len = 4;
-    arp->op_code        = ARP_BROAD_REQ;
+    arp_fill_common(arp, ARP_BROAD_REQ);
     memcpy(arp->src_mac.mac, IF_MAC(oif), sizeof(MacAddr));
     inet_pton(AF_INET, IF_IP(oif), &arp->src_ip);
-    arp->src_ip = htonl(arp->src_ip);
     memset(arp->dst_mac.mac, 0, sizeof(MacAddr));
     inet_pton(AF_INET, ip_addr, &arp->dst_ip);
-    arp->dst_ip = htonl(arp->dst_ip);
 
-    eth->FCS = 0;
-    send_pkt_out((char*)eth, sizeof(EthernetHdr) + sizeof(ArpHdr), oif);
+    send_pkt_out((char*)eth, ARP_FRAME_SIZE, oif);
     free(eth);
 }
 
@@ -221,25 +225,19 @@ void send_gratuitous_arp(Node* node, Interface* oif){
     }
     layer2_fill_with_broadcast_mac((char*)eth->dst_mac.mac);
     memcpy(eth->src_mac.mac, IF_MAC(oif), sizeof(MacAddr));
-    eth->type = ARP_MSG;
+    eth->type = htons(ARP_MSG);
 
     ArpHdr* arp = (ArpHdr*)eth->payload;
-    arp->hw_type        = 1;
-    arp->proto_type     = 0x0800;
-    arp->hw_addr_len    = sizeof(MacAddr);
-    arp->proto_addr_len = 4;
-    arp->op_code        = ARP_REPLY;
+    arp_fill_common(arp, ARP_REPLY);
     memcpy(arp->src_mac.mac, IF_MAC(oif), sizeof(MacAddr));
     inet_pton(AF_INET, IF_IP(oif), &arp->src_ip);
-    arp->src_ip = htonl(arp->src_ip);
     // RFC 5227: target MAC is broadcast; target IP equals our IP.
     memset(arp->dst_mac.mac, 0xFF, sizeof(MacAddr));
     arp->dst_ip = arp->src_ip;
 
-    eth->FCS = 0;
     printf("GARP : %s : announcing %s on %s\n",
            node->node_name, IF_IP(oif), oif->if_name);
-    send_pkt_out((char*)eth, sizeof(EthernetHdr) + sizeof(ArpHdr), oif);
+    send_pkt_out((char*)eth, ARP_FRAME_SIZE, oif);
     free(eth);
 }
 
@@ -251,22 +249,16 @@ static void send_arp_reply_msg(EthernetHdr* eth_in, Interface* oif){
     }
     memcpy(eth_r->dst_mac.mac, arp_in->src_mac.mac, sizeof(MacAddr));
     memcpy(eth_r->src_mac.mac, IF_MAC(oif),         sizeof(MacAddr));
-    eth_r->type = ARP_MSG;
+    eth_r->type = htons(ARP_MSG);
 
     ArpHdr* arp_r = (ArpHdr*)eth_r->payload;
-    arp_r->hw_type        = 1;
-    arp_r->proto_type     = 0x0800;
-    arp_r->hw_addr_len    = sizeof(MacAddr);
-    arp_r->proto_addr_len = 4;
-    arp_r->op_code        = ARP_REPLY;
+    arp_fill_common(arp_r, ARP_REPLY);
     memcpy(arp_r->src_mac.mac, IF_MAC(oif), sizeof(MacAddr));
     inet_pton(AF_INET, IF_IP(oif), &arp_r->src_ip);
-    arp_r->src_ip = htonl(arp_r->src_ip);
     memcpy(arp_r->dst_mac.mac, arp_in->src_mac.mac, sizeof(MacAddr));
-    arp_r->dst_ip = arp_in->src_ip;       // already in our wire convention
+    arp_r->dst_ip = arp_in->src_ip;       // both network order
 
-    eth_r->FCS = 0;
-    send_pkt_out((char*)eth_r, sizeof(EthernetHdr) + sizeof(ArpHdr), oif);
+    send_pkt_out((char*)eth_r, ARP_FRAME_SIZE, oif);
     free(eth_r);
 }
 
@@ -283,10 +275,9 @@ static void process_arp_broadcast_request(Node* node, Interface* iif, EthernetHd
     printf("%s : ARP Broadcast msg recvd on interface %s of node %s\n",
            __FUNCTION__, iif->if_name, iif->att_node->node_name);
 
-    ArpHdr*      arp     = (ArpHdr*)eth->payload;
-    unsigned int dst_ip  = htonl(arp->dst_ip);
-    char         ip_str[16] = {0};
-    inet_ntop(AF_INET, &dst_ip, ip_str, 16);
+    ArpHdr* arp        = (ArpHdr*)eth->payload;
+    char    ip_str[16] = {0};
+    inet_ntop(AF_INET, &arp->dst_ip, ip_str, 16);
     ip_str[15] = '\0';
 
     if(strncmp(IF_IP(iif), ip_str, 16) != 0){
@@ -312,10 +303,19 @@ void layer2_frame_recv(Node* node, Interface* iif, char* pkt, size_t pkt_size){
     // -> tag if the qualifier flagged a case-6 untagged ingress,
     // then hand off to the L2 switch.
     if(IS_INTF_L3_MODE(iif)){
-        switch(eth->type){
+        unsigned short eth_type = GET_ETHERNET_TYPE(eth);
+        switch(eth_type){
             case ARP_MSG: {
                 ArpHdr* arp = (ArpHdr*)GET_ETHERNET_HDR_PAYLOAD(eth);
-                switch(arp->op_code){
+                // Only IPv4-over-Ethernet ARP; anything else is not ours.
+                if(ntohs(arp->hw_type) != ARP_HW_ETHERNET
+                   || ntohs(arp->proto_type) != IP_HDR_TYPE
+                   || arp->hw_addr_len != sizeof(MacAddr)
+                   || arp->proto_addr_len != 4){
+                    printf("%s : ARP drop, unsupported hw/proto type\n", node->node_name);
+                    break;
+                }
+                switch(ntohs(arp->op_code)){
                     case ARP_BROAD_REQ:
                         process_arp_broadcast_request(node, iif, eth);
                         break;
@@ -344,7 +344,7 @@ void layer2_frame_recv(Node* node, Interface* iif, char* pkt, size_t pkt_size){
                 // Unknown ether-type: kept the old behavior of
                 // promoting to L3 so existing ch5 "L2 Frame" tests
                 // still report something. Real stacks would drop.
-                promote_pkt_to_layer3(node, iif, pkt, pkt_size, eth->type);
+                promote_pkt_to_layer3(node, iif, pkt, pkt_size, eth_type);
                 break;
         }
         return;
@@ -455,32 +455,25 @@ void node_set_intf_vlan_membsership(Node* node, char* intf_name, unsigned int vl
 // In-place tag of an untagged ethernet frame. Returns the new
 // total packet size (4 bytes larger). If the frame is already
 // tagged, the existing VID is overwritten and size is unchanged.
+//
+// Wire layout: the 4-byte tag (TPID 0x8100, TCI) sits between
+// src_mac and the EtherType, all network byte order. We carry no
+// FCS (TAP / NIC hardware owns it), so only type + payload shift.
 unsigned int tag_pkt_with_vlan_id(EthernetHdr* eth, unsigned int total_pkt_size, int vlan_id){
     Vlan8021qHdr* existing = is_pkt_vlan_tagged(eth);
     if(existing){
-        unsigned int payload_size = total_pkt_size - VLAN_ETH_HDR_SIZE_EXCL_PAYLOAD;
-        existing->tci_vid = (short)vlan_id;
-        VLAN_ETH_FCS((VlanEthernetHdr*)eth, payload_size) = 0;
+        SET_802_1Q_VLAN_ID(existing, (unsigned int)vlan_id);
         return total_pkt_size;
     }
-    // Snapshot the untagged frame, then splice the VLAN tag in.
-    char* tmp = calloc(1, total_pkt_size);
-    memcpy(tmp, (char*)eth, total_pkt_size);
+    // Shift (type + payload) right by 4 bytes, then write the tag.
+    // memmove: source and destination overlap.
+    unsigned int tail = total_pkt_size - (sizeof(MacAddr) * 2);
+    char*        tag_at = (char*)eth + (sizeof(MacAddr) * 2);
+    memmove(tag_at + sizeof(Vlan8021qHdr), tag_at, tail);
 
-    unsigned int     payload_size = total_pkt_size - ETH_HDR_SIZE_EXCL_PAYLOAD;
-    VlanEthernetHdr* veth         = (VlanEthernetHdr*)eth;
-    EthernetHdr*     old          = (EthernetHdr*)tmp;
-
-    veth->vlan_8021q_hdr.tpid    = VLAN_8021Q_PROTO;
-    veth->vlan_8021q_hdr.tci_pcp = 0;
-    veth->vlan_8021q_hdr.tci_dei = 0;
-    veth->vlan_8021q_hdr.tci_vid = (short)vlan_id;
-
-    // Shift the (type + payload + FCS) tail forward by 4 bytes.
-    memcpy((char*)&veth->type, (char*)&old->type,
-           sizeof(old->type) + payload_size + sizeof(old->FCS));
-    VLAN_ETH_FCS(veth, payload_size) = 0;
-    free(tmp);
+    Vlan8021qHdr* tag = (Vlan8021qHdr*)tag_at;
+    tag->tpid = htons(VLAN_8021Q_PROTO);
+    tag->tci  = htons((unsigned short)(vlan_id & VLAN_VID_MASK));   // pcp 0, dei 0
 
     return total_pkt_size + sizeof(Vlan8021qHdr);
 }
@@ -492,12 +485,8 @@ unsigned int untag_pkt_with_vlan_id(EthernetHdr* eth, unsigned int total_pkt_siz
     if(!tag){
         return total_pkt_size;
     }
-    VlanEthernetHdr* old = calloc(1, total_pkt_size);
-    memcpy((char*)old, (char*)eth, total_pkt_size);
-    unsigned int payload_size = total_pkt_size - VLAN_ETH_HDR_SIZE_EXCL_PAYLOAD;
-    memcpy((char*)&eth->type, (char*)&old->type,
-           sizeof(eth->type) + payload_size + sizeof(eth->FCS));
-    ETH_FCS(eth, payload_size) = 0;
-    free(old);
+    unsigned int tail = total_pkt_size - VLAN_ETH_HDR_SIZE_EXCL_PAYLOAD
+                      + sizeof(((EthernetHdr*)0)->type);
+    memmove((char*)tag, (char*)tag + sizeof(Vlan8021qHdr), tail);
     return total_pkt_size - sizeof(Vlan8021qHdr);
 }
