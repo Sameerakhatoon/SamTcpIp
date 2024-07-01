@@ -171,9 +171,12 @@ static unsigned short tcp_pseudo_checksum(unsigned int src_ip,
     if(tcp_seg_len > sizeof(scratch) - sizeof(TcpPseudoHdr)){
         return 0;
     }
+    // Callers pass host-order IPs (the TCB / L3 convention); the
+    // pseudo-header is checksummed exactly as a real peer builds it,
+    // so put the addresses in network order like the segment bytes.
     TcpPseudoHdr* ph = (TcpPseudoHdr*)scratch;
-    ph->src_ip     = src_ip;
-    ph->dst_ip     = dst_ip;
+    ph->src_ip     = htonl(src_ip);
+    ph->dst_ip     = htonl(dst_ip);
     ph->zero       = 0;
     ph->protocol   = IP_PROTO_TCP;
     ph->tcp_length = htons((unsigned short)tcp_seg_len);

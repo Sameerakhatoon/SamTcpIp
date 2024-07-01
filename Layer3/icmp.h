@@ -15,11 +15,9 @@
 //
 // Byte-order note:
 //   ICMP fields (identifier, sequence, checksum) are NETWORK byte
-//   order on the real wire. The course's IP src_ip / dst_ip have
-//   lived in HOST byte order since ch5. ch11 honours real ICMP
-//   byte order for the ICMP fields and leaves IP alone. We close
-//   the IP host-order debt when we wire TAP (Milestone 1 ch18) on
-//   any path that touches the real wire.
+//   order on the real wire. Since ch43 the IP header is too; L3
+//   hands L4 a host-order copy of the outer header. Headers QUOTED
+//   inside an ICMP error stay raw wire bytes (ntohl to read them).
 //
 // Checksum self-consistency property: receiver runs the same
 // algorithm over the full received message (including the on-wire

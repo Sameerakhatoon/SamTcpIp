@@ -329,9 +329,9 @@ void layer2_frame_recv(Node* node, Interface* iif, char* pkt, size_t pkt_size){
             }
             case IP_HDR_TYPE: {
                 // ch9: chop the L2 header before handing up. Payload
-                // size = total - L2 header (no FCS in our payload size
-                // calculation: pkt_size already excludes the trailing
-                // FCS field as set by the sender).
+                // size = total - L2 header. Any trailing Ethernet
+                // padding (60-byte minimum frames) is trimmed by L3
+                // using the IP total_length.
                 char*  payload  = GET_ETHERNET_HDR_PAYLOAD(eth);
                 size_t hdr_size = is_pkt_vlan_tagged(eth)
                                   ? VLAN_ETH_HDR_SIZE_EXCL_PAYLOAD

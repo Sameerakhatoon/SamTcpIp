@@ -21,54 +21,66 @@
 
 #pragma pack(push, 1)
 
-// ch12: real RFC 791 IPv4 header. The course shipped this as
-// 22 bytes (ttl / protocol / checksum were `short`); ch12 fixes
-// to exactly 20 bytes so `ihl * 4 == sizeof(IpHdr)` holds and
-// the offsets match the wire format. A static_assert in
-// layer3.c pins this.
+// ch12: real RFC 791 IPv4 header, exactly 20 bytes (pinned by a
+// static_assert in layer3.c).
 //
-// Byte-order convention: multi-byte fields are in HOST byte
-// order on our simulated wire, preserved from the course. Real
-// RFC 791 uses network byte order. The byte-order rule says we close
-// this at the TAP boundary in Milestone 1 ch18.
+// Byte layout is explicit, no bit-fields: C bit-field order is
+// compiler-defined (GCC on x86 puts the first field in the LOW
+// bits, which turned version/ihl into 0x54 instead of 0x45 on the
+// wire). Version+IHL share one byte; flags+offset share one word.
+//
+// Byte-order convention (BSD ip_input style):
+//   - ON THE WIRE every multi-byte field is network byte order.
+//   - L3 ingress verifies the checksum on the wire bytes, then
+//     converts the header IN PLACE to host order (ip_hdr_ntoh)
+//     before routing / handing to L4. L4 handlers therefore read
+//     src_ip / dst_ip / total_length as host-order values.
+//   - Every emit path builds the header in host order and calls
+//     ip_hdr_hton just before computing the checksum.
 typedef struct IpHdr {
-    unsigned int   version    : 4;   // 4 for IPv4
-    unsigned int   ihl        : 4;   // 32-bit words; 5 (= 20 bytes)
-    unsigned char  tos;              // type of service; left zero
+    unsigned char  ver_ihl;          // version (high nibble) | ihl (low nibble, 32-bit words)
+    unsigned char  tos;              // DSCP | ECN; left zero
     unsigned short total_length;     // hdr + payload
-
-    // Fragmentation members we never set / consult.
     unsigned short identification;
-    unsigned int   unused_flag : 1;
-    unsigned int   DF_flag     : 1;
-    unsigned int   MORE_flag   : 1;
-    unsigned int   frag_offset : 13;
-
+    unsigned short frag_off;         // flags (3 high bits) | offset (13 bits, 8-byte units)
     unsigned char  ttl;              // hop limit (decremented on forward)
-    unsigned char  protocol;         // IANA: 1=ICMP
-    unsigned short checksum;         // RFC 1071 over the 20-byte header
+    unsigned char  protocol;         // IANA: 1=ICMP 6=TCP 17=UDP
+    unsigned short checksum;         // RFC 1071 over the header
     unsigned int   src_ip;
     unsigned int   dst_ip;
 } IpHdr;
 
 #pragma pack(pop)
 
+#define IP_FLAG_DF          0x4000
+#define IP_FLAG_MF          0x2000
+#define IP_OFFSET_MASK      0x1FFF
+
+#define IP_HDR_VERSION(h)   ((unsigned int)((h)->ver_ihl >> 4))
+#define IP_HDR_IHL(h)       ((unsigned int)((h)->ver_ihl & 0x0F))
+// Valid only on a host-order header (after ip_hdr_ntoh / before ip_hdr_hton).
+#define IP_HDR_MF(h)        (((h)->frag_off & IP_FLAG_MF) != 0)
+#define IP_HDR_DF(h)        (((h)->frag_off & IP_FLAG_DF) != 0)
+#define IP_HDR_FRAG_OFF(h)  ((unsigned int)((h)->frag_off & IP_OFFSET_MASK))
+
 static inline void initialize_ip_hdr(IpHdr* h){
-    h->version        = 4;
-    h->ihl            = 5;
+    h->ver_ihl        = (4 << 4) | 5;    // IPv4, 20-byte header = 0x45
     h->tos            = 0;
     h->total_length   = 0;
     h->identification = 0;
-    h->unused_flag    = 0;
-    h->DF_flag        = 1;
-    h->MORE_flag      = 0;
-    h->frag_offset    = 0;
+    h->frag_off       = IP_FLAG_DF;
     h->ttl            = 64;
     h->protocol       = 0;
     h->checksum       = 0;
     h->src_ip         = 0;
     h->dst_ip         = 0;
 }
+
+// Flip the multi-byte fields between host and network order.
+// The checksum field is left alone: it is computed over (and
+// stored in) wire order by the emit path.
+void ip_hdr_hton(IpHdr* h);
+void ip_hdr_ntoh(IpHdr* h);
 
 // ch12 test hook: toggles intentional IP-checksum corruption on
 // originate. Production code never calls this. tests/12-real-ip.sh
@@ -132,8 +144,8 @@ void     rt_table_add_route(RtTable* rt_table, char* dst, char mask,
 void     rt_table_add_direct_route(RtTable* rt_table, char* dst, char mask);
 void     dump_rt_table(RtTable* rt_table);
 
-// Longest-prefix-match. `dest_ip` is in host byte order (our wire
-// convention puts IPs in host byte order; see ch5).
+// Longest-prefix-match. `dest_ip` is in host byte order (the wire
+// is network order; L3 converts at ingress, see IpHdr above).
 L3Route* l3rib_lookup_lpm(RtTable* rt_table, unsigned int dest_ip);
 
 #define IS_L3_ROUTES_EQUAL(a, b)                          \

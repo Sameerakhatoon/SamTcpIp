@@ -96,13 +96,16 @@ static void ping_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
         }
         IcmpDestUnreach* du = (IcmpDestUnreach*)payload;
         unsigned short next_mtu = ntohs(du->next_hop_mtu);
+        // The quoted original header is raw wire bytes (L3 only
+        // converts the outer header), so its dst is network order.
         IpHdr* orig = (IpHdr*)(payload + sizeof(IcmpDestUnreach));
+        unsigned int orig_dst = ntohl(orig->dst_ip);
         char dst_str[16];
-        ip_int_to_str(orig->dst_ip, dst_str);
+        ip_int_to_str(orig_dst, dst_str);
         printf("Ping recv : %s : Frag-Needed for %s (next-hop MTU %u)\n",
                node->node_name, dst_str, next_mtu);
         if(next_mtu >= sizeof(IpHdr) + 8){    // sanity
-            pmtu_install(orig->dst_ip, next_mtu);
+            pmtu_install(orig_dst, next_mtu);
         }
         return;
     }

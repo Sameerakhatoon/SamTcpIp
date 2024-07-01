@@ -99,10 +99,11 @@ void udp_test_force_csum_corruption(bool on){
     g_force_udp_csum_corruption = on;
 }
 
-// RFC 768 pseudo-header layout. src_ip / dst_ip handed in as HBO
-// (the simulator's wire convention since ch5; closes at TAP in ch18).
-// `udp_seg_len` is the UdpHdr+payload byte count. Caller has
-// already zeroed UdpHdr.checksum.
+// RFC 768 pseudo-header layout, network byte order. src_ip /
+// dst_ip are handed in as host order (L3 converts the received
+// header at ingress) and htonl'd here. `udp_seg_len` is the
+// UdpHdr+payload byte count. Caller has already zeroed
+// UdpHdr.checksum.
 #pragma pack(push, 1)
 typedef struct UdpPseudoHdr {
     unsigned int   src_ip;
@@ -121,9 +122,11 @@ static unsigned short udp_pseudo_checksum(unsigned int src_ip,
     if(udp_seg_len > sizeof(scratch) - sizeof(UdpPseudoHdr)){
         return 0;
     }
+    // Callers pass host-order IPs; the pseudo-header goes into the
+    // sum in network order, the same bytes a real peer sums.
     UdpPseudoHdr* ph = (UdpPseudoHdr*)scratch;
-    ph->src_ip     = src_ip;
-    ph->dst_ip     = dst_ip;
+    ph->src_ip     = htonl(src_ip);
+    ph->dst_ip     = htonl(dst_ip);
     ph->zero       = 0;
     ph->protocol   = IP_PROTO_UDP;
     ph->udp_length = htons((unsigned short)udp_seg_len);

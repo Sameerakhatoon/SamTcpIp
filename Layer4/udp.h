@@ -13,10 +13,9 @@
 //   - Built-in `udp_echo_handler` (RFC 862-ish) + a printer sink.
 //
 // Byte-order: UdpHdr fields are NETWORK byte order on the wire
-// (same convention ch11 set for ICMP). IP src_ip / dst_ip remain
-// HOST byte order for now (closes at TAP boundary in
-// ch18). The pseudo-header feeds them in HBO; receiver does the
-// same; self-consistency holds on the simulated wire.
+// (same convention ch11 set for ICMP). The IpHdr a handler sees is
+// HOST order (L3 converts it at ingress, ch43); the pseudo-header
+// htonl's the addresses back so the checksum matches a real peer.
 //
 // We ship only what's needed for ch13. UDP
 // Port-Unreach ICMP error emit + RFC 768's "transmitted csum = 0

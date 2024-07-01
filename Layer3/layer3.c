@@ -18,6 +18,39 @@
 // required (or vice versa), the build fails loudly here.
 _Static_assert(sizeof(IpHdr) == 20, "RFC 791 IPv4 header must be 20 bytes");
 
+void ip_hdr_hton(IpHdr* h){
+    h->total_length   = htons(h->total_length);
+    h->identification = htons(h->identification);
+    h->frag_off       = htons(h->frag_off);
+    h->src_ip         = htonl(h->src_ip);
+    h->dst_ip         = htonl(h->dst_ip);
+}
+
+void ip_hdr_ntoh(IpHdr* h){
+    h->total_length   = ntohs(h->total_length);
+    h->identification = ntohs(h->identification);
+    h->frag_off       = ntohs(h->frag_off);
+    h->src_ip         = ntohl(h->src_ip);
+    h->dst_ip         = ntohl(h->dst_ip);
+}
+
+// Forwarding a received (host-order) header: TTL-1, back to wire
+// order, fresh checksum. Returns false if TTL expired (drop).
+static bool l3_prepare_forward(Node* node, IpHdr* ip_hdr, size_t hdr_size){
+    if(ip_hdr->ttl <= 1){
+        printf("L3 drop : %s : TTL expired\n", node->node_name);
+        return false;
+    }
+    ip_hdr->ttl--;
+    // TTL is inside the checksummed header, so recompute. RFC 1624's
+    // incremental update is the known optimisation; a full pass over
+    // 20 bytes is fine here.
+    ip_hdr_hton(ip_hdr);
+    ip_hdr->checksum = 0;
+    ip_hdr->checksum = htons(inet_checksum(ip_hdr, hdr_size));
+    return true;
+}
+
 // ch12 test hook: when true, the next demote_packet_to_layer3
 // call XORs one bit of the computed IP checksum before storing
 // it. The receiver's verify path MUST drop the packet.
@@ -414,20 +447,34 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
 
     IpHdr* ip_hdr = (IpHdr*)pkt;
 
-    // ch12: verify the IP header checksum. RFC 1071 self-consistency:
-    // running the algorithm over the whole header (including the
-    // stored checksum field) yields 0 on a valid header. ihl*4 is
-    // now 20 == sizeof(IpHdr); use ihl*4 to be option-tolerant if a
-    // future chapter adds IP options.
-    size_t hdr_size = ip_hdr->ihl * 4u;
+    // ch12: validate the WIRE header before trusting any field.
+    // RFC 1071 self-consistency: running the algorithm over the
+    // whole header (including the stored checksum) yields 0 on a
+    // valid header. ihl*4 keeps us option-tolerant.
+    if(pkt_size < sizeof(IpHdr) || IP_HDR_VERSION(ip_hdr) != 4){
+        printf("L3 drop : %s : not IPv4 (version=%u, %zu bytes)\n",
+               node->node_name,
+               pkt_size >= 1 ? IP_HDR_VERSION(ip_hdr) : 0u, pkt_size);
+        return;
+    }
+    size_t hdr_size = IP_HDR_IHL(ip_hdr) * 4u;
     if(hdr_size < 20 || hdr_size > pkt_size){
-        printf("L3 drop : %s : bad ihl=%u\n", node->node_name, ip_hdr->ihl);
+        printf("L3 drop : %s : bad ihl=%u\n", node->node_name, IP_HDR_IHL(ip_hdr));
         return;
     }
     if(inet_checksum(ip_hdr, hdr_size) != 0){
         printf("L3 drop : %s : IP checksum invalid\n", node->node_name);
         return;
     }
+    // Wire is network order; route + hand to L4 in host order.
+    ip_hdr_ntoh(ip_hdr);
+    if(ip_hdr->total_length < hdr_size || ip_hdr->total_length > pkt_size){
+        printf("L3 drop : %s : bad total_length=%u (frame carries %zu)\n",
+               node->node_name, ip_hdr->total_length, pkt_size);
+        return;
+    }
+    // Trim any Ethernet padding past the datagram.
+    pkt_size = ip_hdr->total_length;
 
     L3Route* route = l3rib_lookup_lpm(NODE_RT_TABLE(node), ip_hdr->dst_ip);
     if(!route){
@@ -443,7 +490,7 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
             // ch34: fragment? Accumulate into reassembly entry; on
             // completion, deliver the assembled L4 payload to the
             // registered protocol handler.
-            bool is_fragment = (ip_hdr->MORE_flag != 0) || (ip_hdr->frag_offset != 0);
+            bool is_fragment = IP_HDR_MF(ip_hdr) || (IP_HDR_FRAG_OFF(ip_hdr) != 0);
             char*  l4_hdr  = (char*)ip_hdr + hdr_size;
             size_t l4_size = ip_hdr->total_length - hdr_size;
             if(is_fragment){
@@ -463,7 +510,7 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
                     init_glthread(&r->glue);
                     glthread_add_last(&g_reasm_list, &r->glue);
                 }
-                unsigned int byte_off = (unsigned int)ip_hdr->frag_offset * 8u;
+                unsigned int byte_off = IP_HDR_FRAG_OFF(ip_hdr) * 8u;
                 if(byte_off + l4_size > IP_REASM_BUF_BYTES){
                     printf("IP frag drop : %s : reasm overflow id=%u\n",
                            node->node_name, ip_hdr->identification);
@@ -481,12 +528,12 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
                         r->have_bytes += 8;
                     }
                 }
-                if(ip_hdr->MORE_flag == 0){
+                if(!IP_HDR_MF(ip_hdr)){
                     r->expected_bytes = byte_off + (unsigned int)l4_size;
                 }
                 printf("IP frag recv : %s : id=%u off=%u len=%zu MF=%u (have %u/%u)\n",
                        node->node_name, ip_hdr->identification,
-                       byte_off, l4_size, ip_hdr->MORE_flag,
+                       byte_off, l4_size, IP_HDR_MF(ip_hdr) ? 1u : 0u,
                        r->have_bytes, r->expected_bytes);
                 if(r->expected_bytes > 0 && r->have_bytes >= r->expected_bytes){
                     // Complete. Deliver.
@@ -506,26 +553,23 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
             promote_pkt_to_layer4(node, iif, ip_hdr, l4_hdr, l4_size, ip_hdr->protocol);
             return;
         }
-        // case 2: dst sits in a directly-connected subnet -> resolve
-        // dst MAC and push to L2 (no specific oif; let push-down pick).
+        // case 2: dst sits in a directly-connected subnet -> this is
+        // still a forward (a router hop), so TTL-1 like case 3, then
+        // resolve dst MAC and push to L2 (let push-down pick the oif).
+        unsigned int dst_host = ip_hdr->dst_ip;
+        if(!l3_prepare_forward(node, ip_hdr, hdr_size)){
+            return;
+        }
         layer3_pkt_push_down_to_layer2_for_l2routing(
-                node, ip_hdr->dst_ip, NULL,
+                node, dst_host, NULL,
                 (char*)ip_hdr, pkt_size);
         return;
     }
 
-    // case 3: indirect route -> decrement TTL then forward to gw.
-    ip_hdr->ttl--;
-    if(ip_hdr->ttl == 0){
-        printf("L3 drop : %s : TTL expired\n", node->node_name);
+    // case 3: indirect route -> TTL-1, back to wire order, forward to gw.
+    if(!l3_prepare_forward(node, ip_hdr, hdr_size)){
         return;
     }
-    // ch12: TTL is part of the checksummed area, so we must
-    // recompute. Simplest: zero and run inet_checksum again, store
-    // back in NBO. RFC 1141's incremental-update trick is an
-    // optimisation we skip.
-    ip_hdr->checksum = 0;
-    ip_hdr->checksum = htons(inet_checksum(ip_hdr, hdr_size));
 
     unsigned int next_hop_ip = 0;
     inet_pton(AF_INET, route->gw_ip, &next_hop_ip);
@@ -629,18 +673,29 @@ static void emit_one_ip_fragment(Node* node, IpHdr* template_ip,
                                  unsigned short ip_id,
                                  bool more, unsigned short frag_offset_8,
                                  L3Route* route){
-    char   buf[256] = {0};
+    char   buf[ETH_MAX_PAYLOAD] = {0};
     IpHdr* ip = (IpHdr*)buf;
-    *ip = *template_ip;
     size_t hdr_bytes  = sizeof(IpHdr);
-    ip->total_length  = (unsigned short)(hdr_bytes + payload_size);
+    if(hdr_bytes + payload_size > sizeof(buf)){
+        printf("L3 originate drop : %s : fragment too big (%zu)\n",
+               node->node_name, payload_size);
+        return;
+    }
+    // Build in host order...
+    *ip = *template_ip;
+    ip->total_length   = (unsigned short)(hdr_bytes + payload_size);
     ip->identification = ip_id;
-    ip->DF_flag       = 0;
-    ip->MORE_flag     = more ? 1 : 0;
-    ip->frag_offset   = frag_offset_8;
+    ip->frag_off       = (unsigned short)((more ? IP_FLAG_MF : 0)
+                                          | (frag_offset_8 & IP_OFFSET_MASK));
 
     memcpy(buf + hdr_bytes, payload, payload_size);
 
+    // ...keep the host-order values push-down needs...
+    unsigned int dst_host  = ip->dst_ip;
+    size_t       wire_size = ip->total_length;
+
+    // ...then flip to wire order and checksum the wire bytes.
+    ip_hdr_hton(ip);
     ip->checksum = 0;
     ip->checksum = htons(inet_checksum(ip, hdr_bytes));
     if(g_force_ip_csum_corrupt){
@@ -649,12 +704,12 @@ static void emit_one_ip_fragment(Node* node, IpHdr* template_ip,
 
     if(l3_is_direct_route(route)){
         layer3_pkt_push_down_to_layer2_for_l2routing(
-                node, ip->dst_ip, NULL, buf, ip->total_length);
+                node, dst_host, NULL, buf, wire_size);
         return;
     }
     unsigned int next_hop_ip = 0;
     inet_pton(AF_INET, route->gw_ip, &next_hop_ip);
     next_hop_ip = htonl(next_hop_ip);
     layer3_pkt_push_down_to_layer2_for_l2routing(
-            node, next_hop_ip, route->oif, buf, ip->total_length);
+            node, next_hop_ip, route->oif, buf, wire_size);
 }
