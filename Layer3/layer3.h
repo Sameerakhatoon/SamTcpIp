@@ -99,6 +99,11 @@ void l3_test_force_ip_csum_corruption(bool on);
 // (a 250-byte UDP becomes 3 fragments) and 100 = 12*8 + 4 - we
 // round chunk sizes down to a multiple of 8 except the last,
 // which can carry a sub-8-byte tail.
+//
+// ch43: the real budget is now the egress interface MTU minus 20
+// (IF_MTU). Simulator links default to SIM_INTF_DEFAULT_MTU 120,
+// i.e. exactly this 100; the TAP link gets 1500 (budget 1480).
+// This constant is the fallback when no egress interface is known.
 #define IP_MAX_FRAG_PAYLOAD     100
 #define IP_REASM_BUF_BYTES      1600    // max reassembled L4 payload
 #define IP_REASM_TIMEOUT_MS     30000   // RFC 791 lower bound is 15s; we use 30s

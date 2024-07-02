@@ -97,7 +97,15 @@ struct IntfNwProps {
     bool         is_ipadd_config;
     IpAddr       ip_add;
     char         mask;
+    // Largest IP datagram (header + payload) this interface sends
+    // unfragmented. Simulator links default to a deliberately
+    // narrow 120 so fragmentation is visible in tests; tap_attach
+    // raises the TAP-backed interface to the Ethernet 1500.
+    unsigned int mtu;
 };
+
+#define SIM_INTF_DEFAULT_MTU   120
+#define ETH_DEFAULT_MTU        1500
 
 void init_node_nw_prop(NodeNwProp* p);
 void init_intf_nw_prop(IntfNwProps* p);
@@ -108,6 +116,7 @@ void init_intf_nw_prop(IntfNwProps* p);
 #define IF_IP(intf_ptr)          ((char*)((intf_ptr)->intf_nw_props.ip_add.ip_addr))
 #define IF_L2_MODE(intf_ptr)     ((intf_ptr)->intf_nw_props.intf_l2_mode)
 #define IS_INTF_L3_MODE(intf_ptr) ((intf_ptr)->intf_nw_props.is_ipadd_config == true)
+#define IF_MTU(intf_ptr)         ((intf_ptr)->intf_nw_props.mtu)
 #define NODE_LO_ADDR(node_ptr)   ((char*)((node_ptr)->node_nw_prop.lb_addr.ip_addr))
 #define NODE_ARP_TABLE(node_ptr) ((node_ptr)->node_nw_prop.arp_table)
 #define NODE_MAC_TABLE(node_ptr) ((node_ptr)->node_nw_prop.mac_table)

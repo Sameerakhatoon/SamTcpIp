@@ -165,6 +165,9 @@ int tap_attach(Node* node, const char* ifname, const char* iif_name){
     g_tap_fd       = fd;
     g_tap_node     = node;
     g_tap_iif      = iif;
+    // The TAP is a real Ethernet link: full 1500-byte MTU, so we
+    // only fragment what a real stack would.
+    IF_MTU(iif)    = ETH_DEFAULT_MTU;
     atomic_store(&g_tap_stop, 0);
     atomic_store(&g_tap_running, 1);
 
@@ -211,6 +214,9 @@ void tap_detach(void){
     atomic_store(&g_tap_stop, 1);
     pthread_join(g_tap_thread_id, NULL);
     tap_close(g_tap_fd);
+    if(g_tap_iif){
+        IF_MTU(g_tap_iif) = SIM_INTF_DEFAULT_MTU;   // back on the simulator wire
+    }
     g_tap_fd   = -1;
     g_tap_node = NULL;
     g_tap_iif  = NULL;

@@ -71,6 +71,7 @@ void init_intf_nw_prop(IntfNwProps* p){
     p->is_ipadd_config = false;
     memset(p->ip_add.ip_addr, 0, sizeof(p->ip_add.ip_addr));
     p->mask = 0;
+    p->mtu  = SIM_INTF_DEFAULT_MTU;
 }
 
 // ch5: with MacAddr shrunk to 6 bytes, the ch2 "concat name into

@@ -631,10 +631,18 @@ void demote_packet_to_layer3(Node* node, char* pkt, size_t pkt_size,
     unsigned short id = g_ip_id_next++;
     if(g_ip_id_next == 0) g_ip_id_next = 1;     // avoid 0 = "unset"
 
+    // Per-fragment payload budget starts from the egress link MTU
+    // (simulator links 120 -> 100 bytes, the TAP link 1500 -> 1480).
+    size_t per_frag = IP_MAX_FRAG_PAYLOAD;
+    if(src_intf && IF_MTU(src_intf) > sizeof(IpHdr)){
+        per_frag = IF_MTU(src_intf) - sizeof(IpHdr);
+    }
+    if(per_frag > ETH_MAX_PAYLOAD - sizeof(IpHdr)){
+        per_frag = ETH_MAX_PAYLOAD - sizeof(IpHdr);
+    }
     // ch39: PMTUD - if a cached path MTU exists for this dst, it
     // CAPS the per-fragment IP payload. Cache stores total MTU
     // (header + payload); subtract sizeof(IpHdr) for the budget.
-    size_t per_frag = IP_MAX_FRAG_PAYLOAD;
     unsigned int cached_mtu = pmtu_lookup(tmpl.dst_ip);
     if(cached_mtu > sizeof(IpHdr)){
         size_t pmtu_payload = cached_mtu - sizeof(IpHdr);
