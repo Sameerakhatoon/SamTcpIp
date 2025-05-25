@@ -379,6 +379,72 @@ static void promote_pkt_to_layer4(Node* node, Interface* iif, IpHdr* ip_hdr,
            l4_hdr);
 }
 
+// Datagrams waiting for ARP. The reference dropped the
+// packet that caused an ARP miss ("upper layers can retransmit"), so
+// the first ping and the first SYN to a new neighbour were lost. Up to
+// ARP_PENDING_MAX datagrams wait here, the oldest giving way, and go
+// out when an ARP entry for their next hop is installed
+// (l3_arp_resolved, from layer2's table update).
+#define ARP_PENDING_MAX  16
+
+typedef struct ArpPending {
+    Node*        node;
+    unsigned int next_hop_ip;      // host order
+    Interface*   oif;
+    size_t       size;
+    char         pkt[ETH_MAX_PAYLOAD];
+} ArpPending;
+
+static ArpPending* g_arp_pending[ARP_PENDING_MAX];
+
+static void arp_pending_add(Node* node, unsigned int next_hop_ip, Interface* oif,
+                            char* pkt, size_t pkt_size){
+    if(pkt_size > ETH_MAX_PAYLOAD){
+        return;
+    }
+    int slot = 0;
+    for(int i = 0; i < ARP_PENDING_MAX; i++){
+        if(!g_arp_pending[i]){
+            slot = i;
+            break;
+        }
+    }
+    if(g_arp_pending[slot]){
+        free(g_arp_pending[slot]);     // full: the oldest (slot 0) goes
+        memmove(g_arp_pending, g_arp_pending + 1, sizeof(g_arp_pending) - sizeof(g_arp_pending[0]));
+        slot = ARP_PENDING_MAX - 1;
+    }
+    ArpPending* p = calloc(1, sizeof(ArpPending));
+    if(!p){
+        g_arp_pending[slot] = 0;
+        return;
+    }
+    p->node        = node;
+    p->next_hop_ip = next_hop_ip;
+    p->oif         = oif;
+    p->size        = pkt_size;
+    memcpy(p->pkt, pkt, pkt_size);
+    g_arp_pending[slot] = p;
+}
+
+void l3_arp_resolved(Node* node){
+    for(int i = 0; i < ARP_PENDING_MAX; i++){
+        ArpPending* p = g_arp_pending[i];
+        if(!p || p->node != node){
+            continue;
+        }
+        char hop[16];
+        ip_int_to_str(p->next_hop_ip, hop);
+        if(!arp_table_lookup(NODE_ARP_TABLE(node), hop)){
+            continue;
+        }
+        g_arp_pending[i] = 0;
+        layer3_pkt_push_down_to_layer2_for_l2routing(node, p->next_hop_ip, p->oif->if_name,
+                                                     p->pkt, p->size);
+        free(p);
+    }
+}
+
 // Send `pkt` (an IP datagram, pkt_size bytes) out via L2. If
 // `outgoing_intf_name` is NULL the OIF is picked by subnet-match on
 // `next_hop_ip` (case: direct route, host on connected subnet).
@@ -386,6 +452,7 @@ static void promote_pkt_to_layer4(Node* node, Interface* iif, IpHdr* ip_hdr,
 //
 // ARP miss: fire a broadcast ARP request and drop this packet. Upper
 // layers can retransmit. This matches the reference's pseudocode.
+// The packet waits for the reply instead (see above).
 static void layer3_pkt_push_down_to_layer2_for_l2routing(
         Node* node, unsigned int next_hop_ip,
         char* outgoing_intf_name, char* pkt, size_t pkt_size){
@@ -415,6 +482,7 @@ static void layer3_pkt_push_down_to_layer2_for_l2routing(
     if(!arp){
         printf("L3 send : %s : ARP miss for %s, firing broadcast on %s\n",
                node->node_name, next_hop_str, oif->if_name);
+        arp_pending_add(node, next_hop_ip, oif, pkt, pkt_size);
         send_arp_broadcast_request(node, oif, next_hop_str);
         return;
     }

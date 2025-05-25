@@ -171,6 +171,10 @@ typedef void (*L4Handler)(Node* node, Interface* iif, struct IpHdr* ip_hdr,
                           char* l4_payload, size_t l4_payload_size);
 void l3_register_l4_handler(int protocol_number, L4Handler handler);
 
+// An ARP entry was installed; datagrams that waited
+// for it go out (layer3.c).
+void l3_arp_resolved(Node* node);
+
 // ---- ch9: forwarding pipeline -------------------------------------------
 
 // L3 ingress from L2 (L2 hdr already chopped). `pkt` points at the

@@ -9,6 +9,9 @@
 #include "../utils.h"
 #include "layer2.h"
 
+// Layer3/layer3.c, datagrams waiting for ARP.
+extern void l3_arp_resolved(Node* node);
+
 // Forward declarations.
 static void promote_pkt_to_layer3(Node* node, Interface* iif, char* pkt, size_t pkt_size, int proto);
 static void send_arp_reply_msg(EthernetHdr* eth_in, Interface* oif);
@@ -138,6 +141,7 @@ void arp_table_update_from_arp_reply(ArpTable* arp_table, ArpHdr* arp_hdr, Inter
     if(!arp_table_entry_add(arp_table, e)){
         free(e);
     }
+    l3_arp_resolved(iif->att_node);   // send what waited for it
 }
 
 void dump_arp_table(ArpTable* arp_table){
