@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <string.h>
+#include <time.h>
 #include "net.h"           // for UNSET_BIT
 #include "utils.h"
 
@@ -62,4 +63,10 @@ unsigned short inet_checksum(const void* data, size_t len){
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
     return (unsigned short)(~sum & 0xFFFF);
+}
+
+unsigned long net_now_ms(void){
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (unsigned long)ts.tv_sec * 1000ul + (unsigned long)(ts.tv_nsec / 1000000);
 }

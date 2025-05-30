@@ -39,6 +39,9 @@ static void           send_rst_segment(Node* node,
                                        unsigned int seq, unsigned int ack,
                                        bool with_ack);
 static const char*    state_name(unsigned char s);
+static unsigned int   tcp_rwnd(Tcb* tcb);
+static void          tcp_arm(Tcb* tcb);
+static void          send_syn(Tcb* t);
 
 void                  tcp_register(void);
 bool                  tcp_listen(Node* node, unsigned short port);
@@ -98,6 +101,7 @@ static Tcb* tcb_find(Node* node, unsigned int local_ip,
         Tcb* t = glue_to_tcb(cur);
         if(t->node != node) continue;
         if(t->state == TCP_LISTEN) continue;
+        if(t->state == TCP_CLOSED) continue;    // a dead TCB is no match
         if(t->local_ip == local_ip && t->local_port == local_port
            && t->remote_ip == remote_ip && t->remote_port == remote_port){
             return t;
@@ -118,6 +122,17 @@ static Tcb* tcb_find_listener(Node* node, unsigned short local_port){
     return 0;
 }
 
+// SamTcpIp: the next ISS of an active (SYN) or passive
+// (SYN-ACK) open. See tcb_alloc.
+static unsigned int tcp_next_iss(bool active){
+    static unsigned int next_active  = 0x2000;
+    static unsigned int next_passive = 0x1000;
+    unsigned int* n = active ? &next_active : &next_passive;
+    unsigned int iss = *n;
+    *n += 0x10000;
+    return iss;
+}
+
 static Tcb* tcb_alloc(Node* node){
     ensure_tcbs_init();           // ch27 fix: alloc was not initialising the list head
     Tcb* t = calloc(1, sizeof(Tcb));
@@ -127,9 +142,17 @@ static Tcb* tcb_alloc(Node* node){
     // RFC 793 ISN: real implementations pick (mod 2^32) over time.
     // Deterministic for the test harness; tcb_alloc id-shifted to
     // avoid clashes across concurrent TCBs.
+    // A new ISS per connection, 64 Ki apart, so a 4-tuple
+    // used again soon (a fast reconnect) does not meet its old segments.
+    // SamTcpIp: two sequences, set when the SYN or SYN-ACK is built
+    // (tcp_next_iss), so the first active open still starts at ch22's
+    // 0x2000 and the first passive one at 0x1000, as the course's tests
+    // and chapters show. SamOS numbers every TCB from one sequence.
     t->iss      = 0x1000;
+    t->rto_ms   = TCP_RTO_INIT_MS;
     t->snd_nxt  = t->iss;
     t->snd_una  = t->iss;
+    t->snd_max  = t->iss;
     t->peer_mss = 536;     // RFC 879 default if no MSS option.
     // ch40: RFC 5681 - initial cwnd = 1 segment (we use the SMSS
     // we've initialized, peer_mss; updated when we learn peer's
@@ -213,6 +236,290 @@ static unsigned short tcp_parse_mss(unsigned char* opt_bytes, size_t opt_len){
     return 0;
 }
 
+// ---- send buffer, output, retransmission -----------------
+//
+// Upstream sends each tcp_send_data call as one segment, right away,
+// and forgets it: no copy is kept, so nothing can be retransmitted,
+// and a call that does not fit the window is refused. The kernel's
+// sockets need a byte stream that survives loss, so each TCB keeps
+// what the application queued, from snd_una on, in `sndbuf`:
+// [snd_una, snd_nxt) is in flight, the rest waits for the window.
+// tcp_output sends what min(cwnd, peer_window) (ch40, ch41) allows,
+// in segments of at most the peer's MSS, and the FIN once the buffer
+// is empty. The retransmission timer (RFC 6298's 1 s initial RTO,
+// doubled per expiry up to TCP_RTO_MAX_MS) runs on the kernel tick
+// (tcp_timer): on expiry it treats the loss as ch40's loss event
+// (ssthresh = max(flight / 2, 2 * MSS), cwnd = MSS) and goes back to
+// snd_una (go-back-N, as there is no SACK); a SYN or SYN-ACK is sent
+// again. TCP_MAX_RETRIES expiries in a row abort the connection.
+
+#define SEQ_LT(a, b)    ((int)((a) - (b)) < 0)
+#define SEQ_LEQ(a, b)   ((int)((a) - (b)) <= 0)
+
+// The window we advertise: the application's room (the socket's
+// receive buffer), ch41's g_tcp_rwnd for a TCB without one.
+static unsigned int tcp_rwnd(Tcb* tcb){
+    unsigned int w = tcb->app || tcb->listener ? tcp_app_window(tcb) : g_tcp_rwnd;
+    return w > 65535 ? 65535 : w;
+}
+
+static unsigned int tcp_mss(Tcb* tcb){
+    return tcb->peer_mss < TCP_OUR_MSS ? tcb->peer_mss : TCP_OUR_MSS;
+}
+
+// snd_nxt moved on: remember the highest sequence that went out, which
+// an ACK may cover even after the retransmission timer rewound snd_nxt.
+static void tcp_sent_upto(Tcb* tcb){
+    if(SEQ_LT(tcb->snd_max, tcb->snd_nxt)){
+        tcb->snd_max = tcb->snd_nxt;
+    }
+}
+
+static void tcp_arm(Tcb* tcb){
+    tcb->rto_at = net_now_ms() + tcb->rto_ms;
+}
+
+// ch40: RFC 5681 loss event, as tcp_simulate_loss does it.
+static void tcp_loss_event(Tcb* t){
+    unsigned int flight  = t->snd_max - t->snd_una;
+    unsigned int half    = flight / 2;
+    unsigned int two_mss = (unsigned int)t->peer_mss * 2u;
+    t->ssthresh = half > two_mss ? half : two_mss;
+    t->cwnd     = t->peer_mss;
+    printf("TCP cwnd : %s : LOSS flight=%u cwnd=%u ssthresh=%u\n",
+           t->node->node_name, flight, t->cwnd, t->ssthresh);
+}
+
+// One data segment (ch23's PSH|ACK), `len` bytes from the send buffer
+// at sequence `seq`.
+static void tcp_emit_data(Tcb* tcb, unsigned int seq, const unsigned char* data, size_t len){
+    unsigned char seg[20 + TCP_OUR_MSS] = {0};
+    TcpHdr* hdr = (TcpHdr*)seg;
+    hdr->src_port = htons(tcb->local_port);
+    hdr->dst_port = htons(tcb->remote_port);
+    hdr->seq      = htonl(seq);
+    hdr->ack      = htonl(tcb->rcv_nxt);
+    hdr->data_off_rsvd = (5 << 4);
+    hdr->flags    = TCP_PSH | TCP_ACK;
+    hdr->window   = htons(tcp_rwnd(tcb));
+    hdr->checksum = 0;
+    hdr->urg_ptr  = 0;
+    memcpy(seg + 20, data, len);
+    hdr->checksum = htons(tcp_pseudo_checksum(tcb->local_ip, tcb->remote_ip, seg, 20 + len));
+    printf("TCP send : %s : data seq=%u len=%zu to %u.%u.%u.%u:%u\n",
+           tcb->node->node_name, seq, len,
+           (tcb->remote_ip >> 24) & 0xFF, (tcb->remote_ip >> 16) & 0xFF,
+           (tcb->remote_ip >> 8)  & 0xFF,  tcb->remote_ip        & 0xFF,
+           tcb->remote_port);
+    demote_packet_to_layer3(tcb->node, (char*)seg, 20 + len, IP_PROTO_TCP, tcb->remote_ip);
+}
+
+void tcp_output(Tcb* tcb){
+    if(tcb->state != TCP_ESTABLISHED && tcb->state != TCP_CLOSE_WAIT
+       && tcb->state != TCP_FIN_WAIT_1 && tcb->state != TCP_LAST_ACK){
+        return;
+    }
+    while(!tcb->fin_sent){
+        unsigned int off = tcb->snd_nxt - tcb->snd_una;
+        if(off >= tcb->sndbuf_len){
+            break;
+        }
+        unsigned int window = tcb->cwnd < tcb->peer_window ? tcb->cwnd : tcb->peer_window;
+        if(window == 0 && off == 0 && tcb->probe){
+            window = 1;                     // zero-window probe
+        }
+        if(off >= window){
+            break;
+        }
+        unsigned int len = tcb->sndbuf_len - off;
+        if(len > window - off) len = window - off;
+        if(len > tcp_mss(tcb)) len = tcp_mss(tcb);
+        unsigned int seq = tcb->snd_nxt;
+        tcb->snd_nxt += len;                // ch43: advance before the send
+        tcp_sent_upto(tcb);
+        tcp_emit_data(tcb, seq, tcb->sndbuf + off, len);
+    }
+    tcb->probe = false;
+    if(tcb->fin_pending && !tcb->fin_sent && tcb->snd_nxt - tcb->snd_una == tcb->sndbuf_len){
+        tcb->fin_sent = true;
+        send_fin_ack(tcb);
+    }
+    if(!tcb->rto_at && (tcb->snd_nxt != tcb->snd_una || tcb->sndbuf_len > 0)){
+        tcp_arm(tcb);
+    }
+}
+
+// The ACK field of a synchronized-state segment: ch40's cwnd growth
+// (moved here from the pure-ACK branch), ch41's peer window, and the
+// acknowledged bytes leave the send buffer.
+static void tcp_ack_received(Tcb* tcb, unsigned int ack, unsigned int window){
+    if(window != tcb->peer_window){
+        tcb->peer_window = window;
+        printf("TCP cwnd : %s : peer_window=%u\n",
+               tcb->node->node_name, tcb->peer_window);
+    }
+    // Up to snd_max, not snd_nxt. After a timeout
+    // snd_nxt is back at snd_una, and the peer, which kept the segments
+    // after the lost one, acknowledges all of them at once.
+    if(!SEQ_LT(tcb->snd_una, ack) || !SEQ_LEQ(ack, tcb->snd_max)){
+        return;
+    }
+    unsigned int acked = ack - tcb->snd_una;
+    unsigned int data  = acked < tcb->sndbuf_len ? acked : tcb->sndbuf_len;
+    if(data){                               // no buffer before the first send
+        memmove(tcb->sndbuf, tcb->sndbuf + data, tcb->sndbuf_len - data);
+    }
+    tcb->sndbuf_len -= data;
+    tcb->snd_una = ack;
+    if(SEQ_LT(tcb->snd_nxt, ack)){
+        tcb->snd_nxt = ack;
+    }
+    if(acked > data && tcb->fin_pending){
+        tcb->fin_sent = true;               // the ACK covers our FIN
+    }
+    if(tcb->cwnd <= tcb->ssthresh){
+        // Slow start: cwnd grows by 1 MSS per ACK.
+        tcb->cwnd += tcb->peer_mss;
+        printf("TCP cwnd : %s : slow-start ack=%u acked=%u cwnd=%u ssthresh=%u\n",
+               tcb->node->node_name, ack, acked, tcb->cwnd, tcb->ssthresh);
+    } else {
+        // Congestion avoidance: cwnd += MSS*MSS/cwnd
+        // per ACK (RFC 5681 sec 3.1).
+        unsigned int inc = (unsigned int)tcb->peer_mss
+                         * (unsigned int)tcb->peer_mss / tcb->cwnd;
+        if(inc == 0) inc = 1;
+        tcb->cwnd += inc;
+        printf("TCP cwnd : %s : cong-avoid ack=%u acked=%u cwnd=%u ssthresh=%u\n",
+               tcb->node->node_name, ack, acked, tcb->cwnd, tcb->ssthresh);
+    }
+    tcb->retries = 0;
+    tcb->rto_ms  = TCP_RTO_INIT_MS;
+    tcb->rto_at  = 0;
+    if(tcb->snd_nxt != tcb->snd_una){
+        tcp_arm(tcb);
+    }
+    if(data){
+        tcp_event(tcb, TCP_EV_SENT);
+    }
+}
+
+size_t tcp_queue_data(Tcb* tcb, const char* data, size_t len){
+    if(tcb->fin_pending || (tcb->state != TCP_ESTABLISHED && tcb->state != TCP_CLOSE_WAIT)){
+        return 0;
+    }
+    if(!tcb->sndbuf){
+        tcb->sndbuf = malloc(TCP_SNDBUF_SIZE);
+        if(!tcb->sndbuf){
+            return 0;
+        }
+    }
+    size_t room = TCP_SNDBUF_SIZE - tcb->sndbuf_len;
+    if(len > room) len = room;
+    memcpy(tcb->sndbuf + tcb->sndbuf_len, data, len);
+    tcb->sndbuf_len += (unsigned int)len;
+    tcp_output(tcb);
+    return len;
+}
+
+size_t tcp_send_room(Tcb* tcb){
+    return TCP_SNDBUF_SIZE - tcb->sndbuf_len;
+}
+
+// The application took data: tell the peer when the window it last
+// saw was smaller than a segment (a window update).
+void tcp_window_update(Tcb* tcb, unsigned int before){
+    if(before < tcp_mss(tcb) && tcp_rwnd(tcb) >= tcp_mss(tcb)
+       && (tcb->state == TCP_ESTABLISHED || tcb->state == TCP_FIN_WAIT_1 || tcb->state == TCP_FIN_WAIT_2)){
+        send_bare_ack(tcb);
+    }
+}
+
+unsigned long tcp_rto_count;
+
+void tcp_timer(void){
+    ensure_tcbs_init();
+    unsigned long now = net_now_ms();
+    GlThread* cur = 0;
+    ITERATE_GLTHREAD_BEGIN(&g_tcbs, cur){
+        Tcb* t = glue_to_tcb(cur);
+        // A TCB its socket let go of: freed once closed, or after
+        // TCP_ORPHAN_MS (no TIME_WAIT, a peer that never closes).
+        if(t->orphan && (t->state == TCP_CLOSED || now - t->orphan_since > TCP_ORPHAN_MS)){
+            remove_glthread(&t->glue);
+            free(t->sndbuf);
+            free(t);
+            continue;
+        }
+        if(!t->rto_at || now < t->rto_at){
+            continue;
+        }
+        if(++t->retries > TCP_MAX_RETRIES){
+            printf("TCP timer : %s : %u retransmissions, state=%s -> CLOSED\n",
+                   t->node->node_name, TCP_MAX_RETRIES, state_name(t->state));
+            send_rst_segment(t->node, t->local_ip, t->local_port, t->remote_ip, t->remote_port,
+                             t->snd_nxt, t->rcv_nxt, true);
+            t->state  = TCP_CLOSED;
+            t->rto_at = 0;
+            tcp_event(t, TCP_EV_CLOSED);
+            continue;
+        }
+        t->rto_ms = t->rto_ms * 2 > TCP_RTO_MAX_MS ? TCP_RTO_MAX_MS : t->rto_ms * 2;
+        t->rto_at = 0;
+        tcp_rto_count++;
+        printf("TCP timer : %s : RTO state=%s snd_una=%u snd_nxt=%u try %d\n",
+               t->node->node_name, state_name(t->state), t->snd_una, t->snd_nxt, t->retries);
+        if(t->state == TCP_SYN_SENT){
+            send_syn(t);
+            tcp_arm(t);
+        } else if(t->state == TCP_SYN_RECEIVED){
+            send_synack(t, 0);
+            tcp_arm(t);
+        } else {
+            if(t->snd_max != t->snd_una){
+                tcp_loss_event(t);
+            }
+            t->snd_nxt  = t->snd_una;
+            t->fin_sent = false;
+            t->probe    = t->peer_window == 0;
+            tcp_output(t);
+        }
+    } ITERATE_GLTHREAD_END(&g_tcbs, cur);
+}
+
+// The kernel's sockets hold a TCB, not a 4-tuple.
+Tcb* tcp_open(Node* node, unsigned int dst_ip_host, unsigned short dst_port){
+    unsigned short port = tcp_connect(node, dst_ip_host, dst_port);
+    return port ? tcb_find(node, node_pick_src_ip(node, dst_ip_host), port, dst_ip_host, dst_port) : 0;
+}
+
+Tcb* tcp_listen_tcb(Node* node, unsigned short port, TcpOnData on_data){
+    return tcp_listen_with_handler(node, port, on_data) ? tcb_find_listener(node, port) : 0;
+}
+
+void tcp_close_tcb(Tcb* t){
+    if(t->state == TCP_ESTABLISHED){
+        t->state = TCP_FIN_WAIT_1;
+        printf("TCP close : %s : ESTABLISHED -> FIN_WAIT_1\n", t->node->node_name);
+    } else if(t->state == TCP_CLOSE_WAIT){
+        t->state = TCP_LAST_ACK;
+        printf("TCP close : %s : CLOSE_WAIT -> LAST_ACK\n", t->node->node_name);
+    } else if(t->state == TCP_LISTEN || t->state == TCP_SYN_SENT || t->state == TCP_SYN_RECEIVED){
+        t->state  = TCP_CLOSED;
+        t->rto_at = 0;
+        return;
+    } else {
+        return;
+    }
+    t->fin_pending = true;
+    tcp_output(t);
+}
+
+void tcp_release(Tcb* t){
+    t->app          = 0;
+    t->orphan       = true;
+    t->orphan_since = net_now_ms();
+}
+
 // ---- Receive + FSM ------------------------------------------------------
 
 static void send_synack(Tcb* tcb, unsigned short peer_mss){
@@ -228,7 +535,7 @@ static void send_synack(Tcb* tcb, unsigned short peer_mss){
     hdr->ack      = htonl(tcb->rcv_nxt);
     hdr->data_off_rsvd = (6 << 4);     // 6 * 4 = 24 bytes header
     hdr->flags    = TCP_SYN | TCP_ACK;
-    hdr->window   = htons(g_tcp_rwnd);
+    hdr->window   = htons(tcp_rwnd(tcb));
     hdr->checksum = 0;
     hdr->urg_ptr  = 0;
     // MSS option (kind=2 len=4 mss=1460 default for ethernet).
@@ -246,6 +553,7 @@ static void send_synack(Tcb* tcb, unsigned short peer_mss){
            tcb->remote_port);
     // Our SYN takes one sequence number; account it before it leaves.
     tcb->snd_nxt = tcb->iss + 1;
+    tcp_sent_upto(tcb);
     demote_packet_to_layer3(tcb->node, (char*)seg, 24,
                             IP_PROTO_TCP, tcb->remote_ip);
 }
@@ -315,6 +623,11 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
             child->state       = TCP_SYN_RECEIVED;
             child->rcv_nxt     = seq + 1;     // peer's SYN consumes one
             child->on_data     = lst->on_data; // ch29: inherit handler
+            child->listener    = lst;          // whose accept queue
+            child->iss         = tcp_next_iss(false);
+            child->snd_una     = child->iss;
+            child->snd_nxt     = child->iss;
+            child->snd_max     = child->iss;
             // Parse MSS option if present.
             unsigned short mss = tcp_parse_mss((unsigned char*)l4_payload + sizeof(TcpHdr),
                                                 hdr_len - sizeof(TcpHdr));
@@ -325,6 +638,7 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
                    (child->remote_ip >> 8)  & 0xFF,  child->remote_ip        & 0xFF,
                    child->remote_port, child->peer_mss);
             send_synack(child, mss);
+            tcp_arm(child);                    // SYN-ACK retransmission
             return;
         }
         // ch27: non-SYN segment for an unknown 4-tuple. Real TCP
@@ -350,22 +664,29 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
     if(flags & TCP_RST){
         printf("TCP recv : %s : RST received in state=%s -> CLOSED\n",
                node->node_name, state_name(tcb->state));
-        tcb->state = TCP_CLOSED;
+        tcb->state  = TCP_CLOSED;
+        tcb->rto_at = 0;
+        tcp_event(tcb, TCP_EV_CLOSED);
         return;
     }
 
     // Existing TCB. ch22 only cares about completing the handshake.
+    // The third leg may carry data (and a FIN); it goes
+    // on to the synchronized-state handling below instead of being
+    // dropped by a return.
     if(tcb->state == TCP_SYN_RECEIVED && (flags & TCP_ACK) && ack == tcb->iss + 1){
         tcb->state = TCP_ESTABLISHED;
         // ch40: handshake-consumed byte is now acked.
         tcb->snd_una     = ack;
         tcb->peer_window = (unsigned int)ntohs(hdr->window);
         tcb->cwnd        = tcb->peer_mss;
+        tcb->rto_at      = 0;
+        tcb->retries     = 0;
         printf("TCP recv : %s : ACK seq=%u ack=%u -> ESTABLISHED\n",
                node->node_name, seq, ack);
         printf("TCP cwnd : %s : init cwnd=%u ssthresh=%u peer_win=%u\n",
                node->node_name, tcb->cwnd, tcb->ssthresh, tcb->peer_window);
-        return;
+        tcp_event(tcb, TCP_EV_ESTABLISHED);
     }
     // Active-open: received SYN-ACK while we were in SYN_SENT.
     if(tcb->state == TCP_SYN_SENT
@@ -381,127 +702,119 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
         tcb->snd_una     = ack;
         tcb->peer_window = (unsigned int)ntohs(hdr->window);
         tcb->cwnd        = tcb->peer_mss;
+        tcb->rto_at      = 0;
+        tcb->retries     = 0;
         printf("TCP recv : %s : SYN-ACK seq=%u ack=%u (peer_mss=%u) -> ESTABLISHED\n",
                node->node_name, seq, ack, tcb->peer_mss);
         printf("TCP cwnd : %s : init cwnd=%u ssthresh=%u peer_win=%u\n",
                node->node_name, tcb->cwnd, tcb->ssthresh, tcb->peer_window);
         send_bare_ack(tcb);
+        tcp_event(tcb, TCP_EV_ESTABLISHED);
+        return;
+    }
+    if(tcb->state == TCP_SYN_SENT || tcb->state == TCP_SYN_RECEIVED || tcb->state == TCP_CLOSED){
+        printf("TCP recv : %s : state=%s seq=%u ack=%u flags=0x%02x (no-op)\n",
+               node->node_name, state_name(tcb->state), seq, ack, flags);
         return;
     }
 
-    // ch26: FIN handling. Order matters - check FIN first so the
-    // associated ACK doesn't accidentally drop us into ESTABLISHED
-    // logic on a FIN-only segment.
-    if(flags & TCP_FIN){
+    // The synchronized states, in RFC 793's order:
+    // the ACK field first (ch40's cwnd growth and ch41's peer window,
+    // now for every segment that carries an ACK, not only a pure
+    // one), then the data (ch23), then the FIN (ch26). Upstream
+    // checked the FIN first and so lost data riding on a FIN.
+    size_t data_len = l4_payload_size - hdr_len;
+    if(flags & TCP_ACK){
+        tcp_ack_received(tcb, ack, (unsigned int)ntohs(hdr->window));
+    }
+
+    // ch26: ACK that finishes FIN_WAIT_1 -> FIN_WAIT_2 (peer
+    // ACKed our FIN but hasn't sent their own yet).
+    if(tcb->state == TCP_FIN_WAIT_1 && tcb->fin_sent && (flags & TCP_ACK)
+       && ack == tcb->snd_nxt){
+        tcb->state = TCP_FIN_WAIT_2;
+        printf("TCP recv : %s : ACK ack=%u -> FIN_WAIT_2\n",
+               node->node_name, ack);
+    }
+    // LAST_ACK -> CLOSED on the final ACK.
+    if(tcb->state == TCP_LAST_ACK && tcb->fin_sent && (flags & TCP_ACK)
+       && ack == tcb->snd_nxt){
+        tcb->state = TCP_CLOSED;
+        printf("TCP recv : %s : ACK ack=%u -> CLOSED\n",
+               node->node_name, ack);
+        tcp_event(tcb, TCP_EV_CLOSED);
+        return;
+    }
+
+    bool receiving = tcb->state == TCP_ESTABLISHED || tcb->state == TCP_FIN_WAIT_1
+                  || tcb->state == TCP_FIN_WAIT_2;
+    if((data_len > 0 || (flags & TCP_FIN)) && seq != tcb->rcv_nxt){
+        // Out of order or a retransmission of what we
+        // have: drop it, but ACK what we expect, so a lost ACK is
+        // repaired and the peer's retransmission timer stops.
+        printf("TCP recv : %s : out-of-order data seq=%u rcv_nxt=%u (drop)\n",
+               node->node_name, seq, tcb->rcv_nxt);
+        send_bare_ack(tcb);
+        return;
+    }
+
+    // ch23: payload -> consume + ACK. No more than the
+    // application has room for (the window we advertised).
+    size_t take = receiving ? data_len : 0;
+    if(take > 0){
+        unsigned int room = tcp_rwnd(tcb);
+        if(take > room) take = room;
+        char preview[33] = {0};
+        size_t n = take < 32 ? take : 32;
+        memcpy(preview, l4_payload + hdr_len, n);
+        printf("TCP recv : %s : data seq=%u len=%zu `%s`\n",
+               node->node_name, seq, take, preview);
+        tcb->rcv_nxt += take;
+        // ch29: dispatch to the app handler if registered.
+        if(tcb->on_data){
+            tcb->on_data(tcb, l4_payload + hdr_len, take);
+        }
+    }
+
+    // ch26: FIN handling, once everything before it is in.
+    if((flags & TCP_FIN) && take == data_len){
         switch(tcb->state){
             case TCP_ESTABLISHED:
                 // Peer initiated close. We go to CLOSE_WAIT,
                 // ACK the FIN. Caller can then tcp_close to
                 // send our own FIN -> LAST_ACK.
-                tcb->rcv_nxt = seq + 1;     // FIN consumes one
+                tcb->rcv_nxt += 1;          // FIN consumes one
                 tcb->state   = TCP_CLOSE_WAIT;
                 printf("TCP recv : %s : FIN seq=%u -> CLOSE_WAIT\n",
                        node->node_name, seq);
                 send_bare_ack(tcb);
+                tcp_event(tcb, TCP_EV_FIN);
                 return;
             case TCP_FIN_WAIT_1:
                 // We sent FIN and they responded with FIN+ACK
                 // (combined paths). Both sides closed.
-                tcb->rcv_nxt = seq + 1;
+                tcb->rcv_nxt += 1;
                 tcb->state   = TCP_CLOSED;
+                tcb->rto_at  = 0;
                 printf("TCP recv : %s : FIN+ACK seq=%u -> CLOSED\n",
                        node->node_name, seq);
                 send_bare_ack(tcb);
+                tcp_event(tcb, TCP_EV_CLOSED);
                 return;
             case TCP_FIN_WAIT_2:
-                tcb->rcv_nxt = seq + 1;
+                tcb->rcv_nxt += 1;
                 tcb->state   = TCP_CLOSED;
                 printf("TCP recv : %s : FIN seq=%u -> CLOSED (skipped TIME_WAIT)\n",
                        node->node_name, seq);
                 send_bare_ack(tcb);
+                tcp_event(tcb, TCP_EV_CLOSED);
                 return;
         }
     }
-
-    // ch26: ACK that finishes FIN_WAIT_1 -> FIN_WAIT_2 (peer
-    // ACKed our FIN but hasn't sent their own yet).
-    if(tcb->state == TCP_FIN_WAIT_1 && (flags & TCP_ACK)
-       && ack == tcb->snd_nxt){
-        tcb->state = TCP_FIN_WAIT_2;
-        printf("TCP recv : %s : ACK ack=%u -> FIN_WAIT_2\n",
-               node->node_name, ack);
-        return;
+    if(data_len > 0){
+        send_bare_ack(tcb);
     }
-    // LAST_ACK -> CLOSED on the final ACK.
-    if(tcb->state == TCP_LAST_ACK && (flags & TCP_ACK)
-       && ack == tcb->snd_nxt){
-        tcb->state = TCP_CLOSED;
-        printf("TCP recv : %s : ACK ack=%u -> CLOSED\n",
-               node->node_name, ack);
-        return;
-    }
-
-    // ch23: ESTABLISHED + payload -> consume + ACK.
-    if(tcb->state == TCP_ESTABLISHED){
-        size_t data_len = l4_payload_size - hdr_len;
-        if(data_len > 0 && seq == tcb->rcv_nxt){
-            char preview[33] = {0};
-            size_t n = data_len < 32 ? data_len : 32;
-            memcpy(preview, l4_payload + hdr_len, n);
-            printf("TCP recv : %s : data seq=%u len=%zu `%s`\n",
-                   node->node_name, seq, data_len, preview);
-            tcb->rcv_nxt += data_len;
-            send_bare_ack(tcb);
-            // ch29: dispatch to the app handler if registered.
-            if(tcb->on_data){
-                tcb->on_data(tcb, l4_payload + hdr_len, data_len);
-            }
-            return;
-        }
-        if(data_len == 0 && (flags & TCP_ACK)){
-            // ch40: pure ACK - advance snd_una and grow cwnd if
-            // the ACK actually moves the cumulative position.
-            // ch41: also snapshot the peer's advertised window.
-            unsigned int new_win = (unsigned int)ntohs(hdr->window);
-            if(new_win != tcb->peer_window){
-                tcb->peer_window = new_win;
-                printf("TCP cwnd : %s : peer_window=%u\n",
-                       node->node_name, tcb->peer_window);
-            }
-            if(ack > tcb->snd_una){
-                unsigned int acked = ack - tcb->snd_una;
-                tcb->snd_una = ack;
-                if(tcb->cwnd <= tcb->ssthresh){
-                    // Slow start: cwnd grows by 1 MSS per ACK.
-                    tcb->cwnd += tcb->peer_mss;
-                    printf("TCP cwnd : %s : slow-start ack=%u acked=%u cwnd=%u ssthresh=%u\n",
-                           node->node_name, ack, acked,
-                           tcb->cwnd, tcb->ssthresh);
-                } else {
-                    // Congestion avoidance: cwnd += MSS*MSS/cwnd
-                    // per ACK (RFC 5681 sec 3.1).
-                    unsigned int inc = (unsigned int)tcb->peer_mss
-                                     * (unsigned int)tcb->peer_mss / tcb->cwnd;
-                    if(inc == 0) inc = 1;
-                    tcb->cwnd += inc;
-                    printf("TCP cwnd : %s : cong-avoid ack=%u acked=%u cwnd=%u ssthresh=%u\n",
-                           node->node_name, ack, acked,
-                           tcb->cwnd, tcb->ssthresh);
-                }
-            }
-            return;
-        }
-        if(data_len > 0 && seq != tcb->rcv_nxt){
-            printf("TCP recv : %s : out-of-order data seq=%u rcv_nxt=%u (drop)\n",
-                   node->node_name, seq, tcb->rcv_nxt);
-            return;
-        }
-    }
-
-    // Otherwise: log and drop. Real FSM handling (FIN, RST)
-    // arrives in later chapters.
-    printf("TCP recv : %s : state=%s seq=%u ack=%u flags=0x%02x (no-op)\n",
-           node->node_name, state_name(tcb->state), seq, ack, flags);
+    tcp_output(tcb);
 }
 
 void tcp_register(void){
@@ -530,49 +843,56 @@ bool tcp_listen_with_handler(Node* node, unsigned short port,
     return true;
 }
 
+// The SYN of ch22's active open, on its own so the
+// retransmission timer can send it again.
+static void send_syn(Tcb* t){
+    unsigned char seg[64] = {0};
+    TcpHdr* hdr = (TcpHdr*)seg;
+    hdr->src_port = htons(t->local_port);
+    hdr->dst_port = htons(t->remote_port);
+    hdr->seq      = htonl(t->iss);
+    hdr->ack      = 0;
+    hdr->data_off_rsvd = (6 << 4);
+    hdr->flags    = TCP_SYN;
+    hdr->window   = htons(tcp_rwnd(t));
+    hdr->checksum = 0;
+    hdr->urg_ptr  = 0;
+    seg[20] = 2; seg[21] = 4;
+    seg[22] = (TCP_OUR_MSS >> 8) & 0xFF;
+    seg[23] = TCP_OUR_MSS & 0xFF;
+
+    hdr->checksum = htons(tcp_pseudo_checksum(t->local_ip, t->remote_ip, seg, 24));
+
+    printf("TCP send : %s : SYN seq=%u to %u.%u.%u.%u:%u\n",
+           t->node->node_name, t->iss,
+           (t->remote_ip >> 24) & 0xFF, (t->remote_ip >> 16) & 0xFF,
+           (t->remote_ip >> 8)  & 0xFF,  t->remote_ip        & 0xFF,
+           t->remote_port);
+    demote_packet_to_layer3(t->node, (char*)seg, 24,
+                            IP_PROTO_TCP, t->remote_ip);
+}
+
 void tcp_send_syn(Node* node, unsigned int dst_ip_host,
                   unsigned short src_port, unsigned short dst_port){
     unsigned int src_ip = tcp_pick_src_ip(node, dst_ip_host);
 
     // Allocate a TCB in SYN_SENT so the SYN-ACK reply lands on
-    // our recv path's 4-tuple lookup. Real active-open FSM with
-    // ISN randomisation comes in a later chapter; ch22 just
-    // wires enough to complete the handshake.
+    // our recv path's 4-tuple lookup. A fresh ISS (
+    // tcp_next_iss), the SYN goes again on the retransmission timer.
     Tcb* t = tcb_alloc(node);
     if(!t) return;
+    t->iss         = tcp_next_iss(true);
     t->state       = TCP_SYN_SENT;
     t->local_ip    = src_ip;
     t->local_port  = src_port;
     t->remote_ip   = dst_ip_host;
     t->remote_port = dst_port;
-    t->iss         = 0x2000;
+    t->snd_una     = t->iss;
     t->snd_nxt     = t->iss + 1;       // SYN consumes one
+    t->snd_max     = t->snd_nxt;
     t->rcv_nxt     = 0;                // unknown until SYN-ACK
-
-    unsigned char seg[64] = {0};
-    TcpHdr* hdr = (TcpHdr*)seg;
-    hdr->src_port = htons(src_port);
-    hdr->dst_port = htons(dst_port);
-    hdr->seq      = htonl(t->iss);
-    hdr->ack      = 0;
-    hdr->data_off_rsvd = (6 << 4);
-    hdr->flags    = TCP_SYN;
-    hdr->window   = htons(g_tcp_rwnd);
-    hdr->checksum = 0;
-    hdr->urg_ptr  = 0;
-    seg[20] = 2; seg[21] = 4;
-    seg[22] = (1460 >> 8) & 0xFF;
-    seg[23] = 1460 & 0xFF;
-
-    hdr->checksum = htons(tcp_pseudo_checksum(src_ip, dst_ip_host, seg, 24));
-
-    printf("TCP send : %s : SYN seq=%u to %u.%u.%u.%u:%u\n",
-           node->node_name, t->iss,
-           (dst_ip_host >> 24) & 0xFF, (dst_ip_host >> 16) & 0xFF,
-           (dst_ip_host >> 8)  & 0xFF,  dst_ip_host        & 0xFF,
-           dst_port);
-    demote_packet_to_layer3(node, (char*)seg, 24,
-                            IP_PROTO_TCP, dst_ip_host);
+    send_syn(t);
+    tcp_arm(t);
 }
 
 // ch26: send a FIN|ACK on this TCB. snd_nxt advances by 1 (FIN
@@ -586,7 +906,7 @@ static void send_fin_ack(Tcb* tcb){
     hdr->ack      = htonl(tcb->rcv_nxt);
     hdr->data_off_rsvd = (5 << 4);
     hdr->flags    = TCP_FIN | TCP_ACK;
-    hdr->window   = htons(g_tcp_rwnd);
+    hdr->window   = htons(tcp_rwnd(tcb));
     hdr->checksum = 0;
     hdr->urg_ptr  = 0;
 
@@ -601,6 +921,7 @@ static void send_fin_ack(Tcb* tcb){
     // back on the receive thread before demote returns, and it must
     // find ack == snd_nxt (else FIN_WAIT_1 never moves on).
     tcb->snd_nxt += 1;
+    tcp_sent_upto(tcb);
     demote_packet_to_layer3(tcb->node, (char*)seg, 20,
                             IP_PROTO_TCP, tcb->remote_ip);
 }
@@ -645,7 +966,7 @@ static void send_bare_ack(Tcb* tcb){
     hdr->ack      = htonl(tcb->rcv_nxt);
     hdr->data_off_rsvd = (5 << 4);     // 20 bytes
     hdr->flags    = TCP_ACK;
-    hdr->window   = htons(g_tcp_rwnd);
+    hdr->window   = htons(tcp_rwnd(tcb));
     hdr->checksum = 0;
     hdr->urg_ptr  = 0;
 
@@ -687,55 +1008,18 @@ bool tcp_send_data(Node* node, unsigned int dst_ip_host,
                dst_port);
         return false;
     }
-    if(payload_size > 1400){
-        printf("TCP send : %s : payload too big (%zu)\n",
-               node->node_name, payload_size);
-        return false;
-    }
-    // ch41: send-side window enforcement.
-    //
-    //   allowed = min(cwnd, peer_window) - in_flight
-    //
-    // in_flight is bytes we've sent but not yet seen ACKed
-    // (snd_nxt - snd_una). If the new chunk wouldn't fit we
-    // refuse it - real TCP would queue + drain on ACK; we
-    // print and drop, which is enough to prove the gate.
+    // Into the send buffer; tcp_output sends what the
+    // window allows (ch41's gate) and the rest when ACKs open it.
+    // SamTcpIp: ch41's log line stays, now for a send that waits.
     unsigned int in_flight   = found->snd_nxt - found->snd_una;
     unsigned int window_room = found->cwnd < found->peer_window
-                              ? found->cwnd : found->peer_window;
+                             ? found->cwnd : found->peer_window;
     if(in_flight + payload_size > window_room){
-        printf("TCP send : %s : window-blocked in_flight=%u + len=%zu > min(cwnd=%u, peer_win=%u)\n",
+        printf("TCP send : %s : window-blocked in_flight=%u + len=%zu > min(cwnd=%u, peer_win=%u), queued\n",
                node->node_name, in_flight, payload_size,
                found->cwnd, found->peer_window);
-        return false;
     }
-    unsigned char seg[1500] = {0};
-    TcpHdr* hdr = (TcpHdr*)seg;
-    hdr->src_port = htons(found->local_port);
-    hdr->dst_port = htons(found->remote_port);
-    hdr->seq      = htonl(found->snd_nxt);
-    hdr->ack      = htonl(found->rcv_nxt);
-    hdr->data_off_rsvd = (5 << 4);
-    hdr->flags    = TCP_PSH | TCP_ACK;
-    hdr->window   = htons(g_tcp_rwnd);
-    hdr->checksum = 0;
-    hdr->urg_ptr  = 0;
-    memcpy(seg + 20, payload, payload_size);
-
-    size_t seg_size = 20 + payload_size;
-    hdr->checksum = htons(tcp_pseudo_checksum(found->local_ip, found->remote_ip,
-                                              seg, seg_size));
-    printf("TCP send : %s : data seq=%u len=%zu to %u.%u.%u.%u:%u\n",
-           node->node_name, found->snd_nxt, payload_size,
-           (found->remote_ip >> 24) & 0xFF, (found->remote_ip >> 16) & 0xFF,
-           (found->remote_ip >> 8)  & 0xFF,  found->remote_ip        & 0xFF,
-           found->remote_port);
-    // Same ordering rule as send_fin_ack: account the bytes before
-    // they can be ACKed.
-    found->snd_nxt += payload_size;
-    demote_packet_to_layer3(node, (char*)seg, seg_size,
-                            IP_PROTO_TCP, dst_ip_host);
-    return true;
+    return tcp_queue_data(found, payload, payload_size) == payload_size;
 }
 
 // ch40: artificially trigger a loss event. RFC 5681 sec 3.1:
@@ -758,13 +1042,7 @@ bool tcp_simulate_loss(Node* node, unsigned int dst_ip_host,
         printf("TCP loss : %s : no TCB to dst\n", node->node_name);
         return false;
     }
-    unsigned int flight = t->snd_nxt - t->snd_una;
-    unsigned int half   = flight / 2;
-    unsigned int two_mss = (unsigned int)t->peer_mss * 2u;
-    t->ssthresh = half > two_mss ? half : two_mss;
-    t->cwnd     = t->peer_mss;
-    printf("TCP cwnd : %s : LOSS flight=%u cwnd=%u ssthresh=%u\n",
-           node->node_name, flight, t->cwnd, t->ssthresh);
+    tcp_loss_event(t);         // shared with the RTO
     return true;
 }
 
@@ -788,21 +1066,14 @@ bool tcp_close(Node* node, unsigned int dst_ip_host,
                dst_port);
         return false;
     }
-    if(t->state == TCP_ESTABLISHED){
-        t->state = TCP_FIN_WAIT_1;
-        printf("TCP close : %s : ESTABLISHED -> FIN_WAIT_1\n", node->node_name);
-        send_fin_ack(t);
-        return true;
+    // The FIN goes after the queued data (tcp_output).
+    if(t->state != TCP_ESTABLISHED && t->state != TCP_CLOSE_WAIT){
+        printf("TCP close : %s : state=%s, no-op\n",
+               node->node_name, state_name(t->state));
+        return false;
     }
-    if(t->state == TCP_CLOSE_WAIT){
-        t->state = TCP_LAST_ACK;
-        printf("TCP close : %s : CLOSE_WAIT -> LAST_ACK\n", node->node_name);
-        send_fin_ack(t);
-        return true;
-    }
-    printf("TCP close : %s : state=%s, no-op\n",
-           node->node_name, state_name(t->state));
-    return false;
+    tcp_close_tcb(t);
+    return true;
 }
 
 // ch32: ephemeral port allocator. Linux uses 32768-60999. We
@@ -871,4 +1142,21 @@ void tcp_dump(Node* node){
     if(idx == 0){
         printf("  (none)\n");
     }
+}
+
+// ---- SamTcpIp: the application side SamOS's sockets provide -------------
+//
+// In SamOS net/socket.c defines these: tcp_event wakes the socket's
+// waiters, tcp_app_window is the room left in its receive buffer. The
+// simulator has no sockets; the CLI drives TCBs by 4-tuple and the
+// ch29 on_data handler takes received bytes at once, so the window is
+// ch41's g_tcp_rwnd and an event has nobody to wake.
+void tcp_event(Tcb* tcb, int ev){
+    (void)tcb;
+    (void)ev;
+}
+
+unsigned int tcp_app_window(Tcb* tcb){
+    (void)tcb;
+    return g_tcp_rwnd;
 }

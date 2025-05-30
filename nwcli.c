@@ -1007,9 +1007,23 @@ static CliCmd cmd_show_node = {
     .children = show_node_children,
 };
 
+// `show tcp-stats`, the counters SamOS's netstat prints.
+static int show_tcp_stats_handler(int argc, char** argv){
+    (void)argc;
+    (void)argv;
+    printf("TCP stats : rto=%lu\n", tcp_rto_count);
+    return 0;
+}
+static CliCmd cmd_show_tcp_stats = {
+    .name     = "tcp-stats",
+    .handler  = show_tcp_stats_handler,
+    .help     = "TCP retransmission counters",
+};
+
 static CliCmd* show_children[] = {
     &cmd_show_topology,
     &cmd_show_node,
+    &cmd_show_tcp_stats,
     0,
 };
 
@@ -1331,7 +1345,63 @@ static CliCmd cmd_run_node_tcp_loss = {
     .children = run_node_tcp_loss_ip_children,
 };
 
+// ---- chapter 44 commands ------------------------------------------------
+//
+// The tests for the code that came back from SamOS (docs: tests/44-*
+// and on). A capture level per argument, like the commands above,
+// written with two macros to keep it short.
+#define SB_ARG(var, label, hlp, hnd, kids) \
+    static CliCmd var = { .name = label, .capture = true, .handler = hnd, .help = hlp, .children = kids }
+#define SB_KIDS(var, ...) static CliCmd* var[] = { __VA_ARGS__, 0 }
+
+static Node* sb_node(const char* name){
+    Node* node = find_node_by_name(name);
+    if(!node){
+        fprintf(stderr, "no such node `%s`\n", name);
+    }
+    return node;
+}
+
+// `run sleep <ms>`: let timers run (RTO, TIME_WAIT, reassembly).
+static int run_sleep_handler(int argc, char** argv){
+    if(argc != 1){
+        return 1;
+    }
+    int ms = atoi(argv[0]);
+    if(ms < 0 || ms > 60000){
+        fprintf(stderr, "run sleep: 0..60000 ms\n");
+        return 1;
+    }
+    usleep((useconds_t)ms * 1000);
+    return 0;
+}
+SB_ARG(cmd_run_sleep_ms, "<ms>", "milliseconds", run_sleep_handler, 0);
+SB_KIDS(run_sleep_ms_children, &cmd_run_sleep_ms);
+static CliCmd cmd_run_sleep = {
+    .name = "sleep", .help = "wait <ms> while the timers run", .children = run_sleep_ms_children,
+};
+
+// `run node <n> drop-tcp <skip> <count>`: test loss (comm.c).
+static int run_node_drop_tcp_handler(int argc, char** argv){
+    Node* node = argc == 3 ? sb_node(argv[0]) : 0;
+    if(!node){
+        return 1;
+    }
+    comm_drop_tcp(node, atoi(argv[1]), atoi(argv[2]));
+    return 0;
+}
+SB_ARG(cmd_run_node_drop_tcp_count, "<count>", "segments to drop", run_node_drop_tcp_handler, 0);
+SB_KIDS(run_node_drop_tcp_count_children, &cmd_run_node_drop_tcp_count);
+SB_ARG(cmd_run_node_drop_tcp_skip, "<skip>", "segments to let through first", 0,
+       run_node_drop_tcp_count_children);
+SB_KIDS(run_node_drop_tcp_skip_children, &cmd_run_node_drop_tcp_skip);
+static CliCmd cmd_run_node_drop_tcp = {
+    .name = "drop-tcp", .help = "drop TCP segments this node sends (test loss)",
+    .children = run_node_drop_tcp_skip_children,
+};
+
 static CliCmd* run_node_name_children[] = {
+    &cmd_run_node_drop_tcp,
     &cmd_run_node_resolve,
     &cmd_run_node_ping,
     &cmd_run_node_ping_bad,
@@ -1589,6 +1659,7 @@ static CliCmd* run_children[] = {
     &cmd_run_tcp_rwnd,
     &cmd_run_log_level,
     &cmd_run_log_test,
+    &cmd_run_sleep,
     0,
 };
 
@@ -1770,5 +1841,6 @@ void nwcli_install(Graph* topo){
     udp_install_default_handlers(topo);
     tcp_register();
     network_start_pkt_receiver_thread(topo);
+    net_start_timer_thread();       // tcp_timer's tick
     usleep(50 * 1000);
 }

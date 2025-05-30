@@ -28,8 +28,11 @@ assert_contains "$out" "TCP connect : R0_re : src=20.1.1.1:32768 -> dst=20.1.1.2
 # Second connect picks 32769 (next free).
 assert_contains "$out" "TCP connect : R0_re : src=20.1.1.1:32769 -> dst=20.1.1.2:80" "second connect uses 32769"
 
-# Both handshakes complete.
-n_estab=$(printf '%s\n' "$out" | grep -c '^TCP recv : R0_re : SYN-ACK seq=4096 ack=8193 .* -> ESTABLISHED' || true)
+# Both handshakes complete. Chapter 44: each connection
+# has its own ISS, 64 Ki apart, so the second is 0x12000 both ways.
+assert_contains "$out" "TCP recv : R0_re : SYN-ACK seq=4096 ack=8193 (peer_mss=1460) -> ESTABLISHED" "first handshake"
+assert_contains "$out" "TCP recv : R0_re : SYN-ACK seq=69632 ack=73729 (peer_mss=1460) -> ESTABLISHED" "second handshake, fresh ISS"
+n_estab=$(printf '%s\n' "$out" | grep -c '^TCP recv : R0_re : SYN-ACK seq=.* -> ESTABLISHED' || true)
 if [ "$n_estab" -lt 2 ]; then
     fail "expected 2 ESTABLISHED transitions on R0; got $n_estab"
 fi

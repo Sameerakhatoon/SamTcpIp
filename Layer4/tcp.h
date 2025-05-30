@@ -102,6 +102,21 @@ struct Tcb {
     unsigned int    peer_window;
     TcpOnData       on_data;        // ch29: app-layer hook
     GlThread        glue;
+    // What the kernel's sockets need (tcp.c).
+    unsigned char*  sndbuf;         // queued bytes from snd_una on
+    unsigned int    snd_max;        // the highest sequence sent (go-back-N
+                                    // rewinds snd_nxt, not this)
+    unsigned int    sndbuf_len;
+    bool            fin_pending;    // close asked for: FIN after sndbuf
+    bool            fin_sent;
+    bool            probe;          // a zero-window probe may go
+    unsigned long   rto_at;         // ms (net_now_ms), 0: no timer
+    unsigned int    rto_ms;
+    int             retries;
+    Tcb*            listener;       // a passive child's listener
+    void*           app;            // the socket (net/socket.c)
+    bool            orphan;         // the socket let go: free when closed
+    unsigned long   orphan_since;
 };
 GLTHREAD_TO_STRUCT(glue_to_tcb, Tcb, glue);
 
@@ -155,5 +170,43 @@ bool tcp_simulate_loss(Node* node, unsigned int dst_ip_host,
 // ch41: set the receive-window value we advertise in every
 // outbound segment. Defaults to 1024.
 void tcp_set_rwnd(unsigned short rwnd);
+
+// ---- the kernel's sockets (net/socket.c) --------------------------
+// Upstream drives TCP by 4-tuple from its CLI; the kernel holds the
+// TCB. See tcp.c's send buffer comment for the buffer and the timer.
+
+#define TCP_OUR_MSS         1460        // MTU 1500 - 40
+#define TCP_SNDBUF_SIZE     16384
+#define TCP_RTO_INIT_MS     1000        // RFC 6298
+#define TCP_RTO_MAX_MS      8000
+#define TCP_MAX_RETRIES     8
+#define TCP_ORPHAN_MS       60000
+
+// Events for the application (the kernel defines tcp_event).
+enum {
+    TCP_EV_ESTABLISHED,     // a handshake finished (a listener's child too)
+    TCP_EV_SENT,            // queued bytes were acknowledged: room again
+    TCP_EV_FIN,             // the peer closed its side
+    TCP_EV_CLOSED,          // reset, timed out, or fully closed
+};
+void         tcp_event(Tcb* tcb, int ev);
+// Room the application has for received data (the window advertised).
+unsigned int tcp_app_window(Tcb* tcb);
+
+Tcb*   tcp_open(Node* node, unsigned int dst_ip_host, unsigned short dst_port);
+Tcb*   tcp_listen_tcb(Node* node, unsigned short port, TcpOnData on_data);
+// Bytes taken into the send buffer (0 when full or not open).
+size_t tcp_queue_data(Tcb* tcb, const char* data, size_t len);
+size_t tcp_send_room(Tcb* tcb);
+void   tcp_output(Tcb* tcb);
+void   tcp_close_tcb(Tcb* tcb);
+// The application read; `before` was the window before it did.
+void   tcp_window_update(Tcb* tcb, unsigned int before);
+// The socket is gone: the TCB finishes its close and frees itself.
+void   tcp_release(Tcb* tcb);
+// Retransmission and cleanup, every kernel tick.
+void   tcp_timer(void);
+// Retransmission timeouts so far (net_info, the shell's netstat).
+extern unsigned long tcp_rto_count;
 
 #endif

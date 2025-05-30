@@ -34,4 +34,15 @@ int send_pkt_flood(Node* node, Interface* exempted_intf, char* pkt, size_t pkt_s
 // the recv interface. Layer 2 takes it from here.
 int pkt_receive(Node* node, Interface* iif, char* pkt, size_t pkt_size);
 
+// The lock pkt_receive holds, for other threads that
+// enter the stack (the timer).
+void net_stack_lock(void);
+void net_stack_unlock(void);
+// A thread that runs tcp_timer every 10 ms (SamOS's
+// kernel tick). nwcli_install starts it.
+void net_start_timer_thread(void);
+// Tests: of the TCP segments `node` sends from now on,
+// pass `skip`, then drop `count`.
+void comm_drop_tcp(Node* node, int skip, int count);
+
 #endif

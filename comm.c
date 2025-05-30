@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,7 @@
 #include "graph.h"
 #include "pcap.h"
 #include "tap.h"
+#include "Layer4/tcp.h"
 
 // Forward declarations.
 static unsigned int get_next_udp_port_number(void);
@@ -23,6 +25,7 @@ void                network_start_pkt_receiver_thread(Graph* topo);
 int                 send_pkt_out(char* pkt, size_t pkt_size, Interface* oif);
 int                 send_pkt_flood(Node* node, Interface* exempted_intf, char* pkt, size_t pkt_size);
 int                 pkt_receive(Node* node, Interface* iif, char* pkt, size_t pkt_size);
+static bool         comm_drop_this(char* pkt, size_t pkt_size, Interface* oif);
 
 // Hand-off to the Layer 2 frame receiver - defined in layer2.c.
 extern void layer2_frame_recv(Node* node, Interface* iif, char* pkt, size_t pkt_size);
@@ -162,6 +165,9 @@ int send_pkt_out(char* pkt, size_t pkt_size, Interface* oif){
     if(pkt_size + IF_NAME_SIZE > MAX_PACKET_BUFFER_SIZE){
         return -1;
     }
+    if(comm_drop_this(pkt, pkt_size, oif)){
+        return 0;                       // test loss
+    }
     // ch28: capture egress frame.
     pcap_dump_frame(pkt, pkt_size);
 
@@ -247,6 +253,16 @@ static void init_pkt_recv_mtx(void){
     pthread_mutexattr_destroy(&attr);
 }
 
+// The stack timer takes the same lock as ingress.
+void net_stack_lock(void){
+    pthread_once(&g_pkt_recv_mtx_once, init_pkt_recv_mtx);
+    pthread_mutex_lock(&g_pkt_recv_mtx);
+}
+
+void net_stack_unlock(void){
+    pthread_mutex_unlock(&g_pkt_recv_mtx);
+}
+
 int pkt_receive(Node* node, Interface* iif, char* pkt, size_t pkt_size){
     pthread_once(&g_pkt_recv_mtx_once, init_pkt_recv_mtx);
     pthread_mutex_lock(&g_pkt_recv_mtx);
@@ -255,4 +271,74 @@ int pkt_receive(Node* node, Interface* iif, char* pkt, size_t pkt_size){
     layer2_frame_recv(node, iif, pkt, pkt_size);
     pthread_mutex_unlock(&g_pkt_recv_mtx);
     return 0;
+}
+
+// ---- the stack timer -------------------------------------
+//
+// SamOS runs tcp_timer (retransmission, TIME_WAIT, orphans) from its
+// 100 Hz kernel tick (net/net.c, net_stack_timer). Here a detached
+// thread does the same every NET_TIMER_TICK_MS, under the ingress
+// lock so it never runs inside pkt_receive on the other thread.
+#define NET_TIMER_TICK_MS 10
+
+static void* _net_timer_thread(void* arg){
+    (void)arg;
+    for(;;){
+        usleep(NET_TIMER_TICK_MS * 1000);
+        net_stack_lock();
+        tcp_timer();
+        net_stack_unlock();
+        fflush(stdout);
+    }
+    return 0;
+}
+
+void net_start_timer_thread(void){
+    pthread_attr_t attr;
+    pthread_t      tid;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_create(&tid, &attr, _net_timer_thread, 0);
+    pthread_attr_destroy(&attr);
+}
+
+// ---- test loss --------------------------------------------
+//
+// `run node <n> drop-tcp <skip> <count>`: of the TCP segments `node`
+// sends from now on, let `skip` go, then drop the next `count` before
+// they reach the wire (and before pcap sees them). The retransmission,
+// fast retransmit, out-of-order and half-open tests need a lossy link;
+// the simulator's UDP loopback never loses anything.
+static Node* g_drop_node;
+static int   g_drop_skip;
+static int   g_drop_count;
+
+void comm_drop_tcp(Node* node, int skip, int count){
+    g_drop_node  = node;
+    g_drop_skip  = skip;
+    g_drop_count = count;
+}
+
+static bool comm_drop_this(char* pkt, size_t pkt_size, Interface* oif){
+    if(!g_drop_node || g_drop_count <= 0 || oif->att_node != g_drop_node){
+        return false;
+    }
+    const unsigned char* b = (const unsigned char*)pkt;
+    size_t off = 12;
+    if(pkt_size < off + 2) return false;
+    if(b[off] == 0x81 && b[off + 1] == 0x00){
+        off += 4;                       // 802.1Q tag
+        if(pkt_size < off + 2) return false;
+    }
+    if(b[off] != 0x08 || b[off + 1] != 0x00) return false;
+    off += 2;
+    if(pkt_size < off + 20 || b[off + 9] != 6) return false;
+    if(g_drop_skip > 0){
+        g_drop_skip--;
+        return false;
+    }
+    g_drop_count--;
+    printf("Test loss : %s : TCP segment dropped on %s (%d more to drop)\n",
+           oif->att_node->node_name, oif->if_name, g_drop_count);
+    return true;
 }

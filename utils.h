@@ -33,6 +33,11 @@ void layer2_fill_with_broadcast_mac(char* mac_array);
 // in Layer3/icmp.c; ch12 promotes it here so IP can share it.
 unsigned short inet_checksum(const void* data, size_t len);
 
+// A monotonic clock in milliseconds. SamOS's tcp.c and
+// layer3.c time retransmissions, TIME_WAIT and reassembly with it (the
+// kernel's tick counter there, CLOCK_MONOTONIC here).
+unsigned long net_now_ms(void);
+
 #define IS_MAC_BROADCAST_ADDR(mac)                                     \
     ((unsigned char)(mac)[0] == 0xFF && (unsigned char)(mac)[1] == 0xFF && \
      (unsigned char)(mac)[2] == 0xFF && (unsigned char)(mac)[3] == 0xFF && \

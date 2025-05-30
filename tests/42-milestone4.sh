@@ -40,9 +40,11 @@ echo "$OUT" | grep -q "init cwnd=1460 ssthresh=65535 peer_win=100" || { echo "FA
 echo "$OUT" | grep -q "slow-start ack=" || { echo "FAIL: slow-start growth missing"; exit 1; }
 echo "$OUT" | grep -q "LOSS .* cwnd=1460 ssthresh=" || { echo "FAIL: LOSS event missing"; exit 1; }
 
-# ch41 - oversized send blocked, fitting send went through.
-echo "$OUT" | grep -q "window-blocked .* len=200 > min(cwnd=1460, peer_win=100)" || { echo "FAIL: 200 not blocked"; exit 1; }
-echo "$OUT" | grep -q "data seq=8193 len=40 to 20.1.1.2:80" || { echo "FAIL: 40-byte send did not fire"; exit 1; }
+# ch41 - oversized send window-blocked and queued (chapter 44),
+# then drained 100 bytes per window; the 40-byte sends follow.
+echo "$OUT" | grep -q "window-blocked .* len=200 > min(cwnd=1460, peer_win=100), queued" || { echo "FAIL: 200 not blocked"; exit 1; }
+echo "$OUT" | grep -q "data seq=8193 len=100 to 20.1.1.2:80" || { echo "FAIL: first window of the 200 did not fire"; exit 1; }
+echo "$OUT" | grep -q "data seq=8393 len=.* to 20.1.1.2:80" || { echo "FAIL: 40-byte send did not fire"; exit 1; }
 
 # Regression: original ping still works.
 echo "$OUT" | grep -q "Ping reply : R0_re : seq=3 from 20.1.1.2" || { echo "FAIL: ping regression"; exit 1; }
