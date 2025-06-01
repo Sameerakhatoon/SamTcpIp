@@ -30,6 +30,11 @@
 #define ICMP_PROTO            1
 #define ICMP_ECHO_REPLY       0
 #define ICMP_ECHO_REQUEST     8
+// RFC 792 Time Exceeded, code 0 (TTL exceeded in transit). The
+// body is 4 unused bytes, then the original IP header and the first
+// 8 bytes of its payload, as for Destination Unreachable (pmtu.h).
+#define ICMP_TIME_EXCEEDED    11
+#define ICMP_ERROR_HDR_SIZE   8
 
 #pragma pack(push, 1)
 typedef struct IcmpHdr {

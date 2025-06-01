@@ -189,5 +189,10 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
 // (the same convention LPM uses). Used by the `ping` CLI.
 void demote_packet_to_layer3(Node* node, char* pkt, size_t pkt_size,
                              int protocol_number, unsigned int dest_ip_address);
+// The same with the IP header's TTL set to `ttl` (0: the
+// default, 64). Ping's -t, a traceroute-like probe.
+void demote_packet_to_layer3_ttl(Node* node, char* pkt, size_t pkt_size,
+                                 int protocol_number, unsigned int dest_ip_address,
+                                 unsigned char ttl);
 
 #endif

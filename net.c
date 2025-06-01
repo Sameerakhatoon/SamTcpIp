@@ -53,6 +53,12 @@ void init_node_nw_prop(NodeNwProp* p){
     p->flags             = 0;
     p->is_lb_addr_config = false;
     memset(p->lb_addr.ip_addr, 0, sizeof(p->lb_addr.ip_addr));
+    // Forwarding on, as every simulator router had it.
+    p->ip_forward      = true;
+    p->fwd_packets     = 0;
+    p->fwd_ttl_expired = 0;
+    p->fwd_refused     = 0;
+    p->fwd_no_route    = 0;
     // ch5: every Node gets an empty ARP table at creation time.
     init_arp_table(&p->arp_table);
     // ch6: empty mac-learning table.

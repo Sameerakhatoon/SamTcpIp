@@ -19,6 +19,9 @@ void ping_register(void);
 // Originate one ECHO REQUEST with the given sequence number.
 // The reply lands on ping_recv and prints "Ping reply : ...".
 void ping_send_request(Node* node, char* dst_ip_str, short seq);
+// The same with this IP TTL (0: the default). With a TTL too
+// small for the path a router answers with Time Exceeded.
+void ping_send_request_ttl(Node* node, char* dst_ip_str, short seq, unsigned char ttl);
 
 // ch11 test hook: same as ping_send_request but XORs one bit of
 // the computed checksum before emit. Receiver MUST drop.

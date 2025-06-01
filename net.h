@@ -85,6 +85,16 @@ struct NodeNwProp {
     RtTable*     rt_table;           // ch8: per-Node L3 routing table
     bool         is_lb_addr_config;
     IpAddr       lb_addr;
+    // A datagram for another host is routed on only when
+    // ip_forward is set. init_node_nw_prop sets it (the simulator's
+    // routers always forwarded); SamOS clears it unless the boot
+    // asks for it (samos.ip_forward, net/net.c). The counters are
+    // what `route` prints.
+    bool          ip_forward;
+    unsigned long fwd_packets;       // routed on, TTL decremented
+    unsigned long fwd_ttl_expired;   // TTL 1 or 0: dropped, Time Exceeded sent
+    unsigned long fwd_refused;       // not for us, forwarding off
+    unsigned long fwd_no_route;      // no route for the destination
 };
 
 struct IntfNwProps {

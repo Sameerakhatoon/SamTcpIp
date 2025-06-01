@@ -14,7 +14,8 @@
 static void ping_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
                       char* payload, size_t payload_size);
 static void ip_int_to_str(unsigned int ip_host_order, char* out16);
-static void send_one_request(Node* node, char* dst_ip_str, short seq, bool corrupt);
+static void send_one_request(Node* node, char* dst_ip_str, short seq, bool corrupt,
+                             unsigned char ttl);
 void        ping_register(void);
 void        ping_send_request(Node* node, char* dst_ip_str, short seq);
 void        ping_send_request_bad_checksum(Node* node, char* dst_ip_str, short seq);
@@ -79,8 +80,29 @@ static void ping_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
         return;
     }
     if(in->type == ICMP_ECHO_REPLY){
-        printf("Ping reply : %s : seq=%u from %s\n",
-               node->node_name, seq_host, src_str);
+        printf("Ping reply : %s : seq=%u from %s ttl=%u\n",
+               node->node_name, seq_host, src_str, ip_hdr->ttl);
+        return;
+    }
+    // A router dropped one of our echo requests on its TTL. The
+    // body quotes the request's IP header (wire order) and its first
+    // 8 bytes: the echo header with the sequence number.
+    if(in->type == ICMP_TIME_EXCEEDED){
+        const unsigned char* q = (const unsigned char*)payload + ICMP_ERROR_HDR_SIZE;
+        size_t qlen = payload_size - ICMP_ERROR_HDR_SIZE;
+        IpHdr* orig = (IpHdr*)q;
+        size_t ohl = payload_size >= ICMP_ERROR_HDR_SIZE + sizeof(IpHdr) ? IP_HDR_IHL(orig) * 4u : 0;
+        if(ohl < sizeof(IpHdr) || qlen < ohl + sizeof(IcmpHdr) || orig->protocol != ICMP_PROTO){
+            printf("Ping recv : %s : Time Exceeded from %s, not about a ping\n",
+                   node->node_name, src_str);
+            return;
+        }
+        IcmpHdr* req = (IcmpHdr*)(q + ohl);
+        if(req->type != ICMP_ECHO_REQUEST){
+            return;
+        }
+        unsigned short seq = ntohs(req->sequence);
+        printf("Ping recv : %s : Time Exceeded seq=%u from %s\n", node->node_name, seq, src_str);
         return;
     }
     // ch39: RFC 1191 PMTUD. ICMP Type 3 Code 4 = "Fragmentation
@@ -120,7 +142,8 @@ void ping_register(void){
 // Build + emit one ECHO REQUEST. When `corrupt` is true, XOR one
 // bit of the checksum after computing it (test hook for the
 // receiver's verify path).
-static void send_one_request(Node* node, char* dst_ip_str, short seq, bool corrupt){
+static void send_one_request(Node* node, char* dst_ip_str, short seq, bool corrupt,
+                             unsigned char ttl){
     unsigned int dst_net = 0;
     if(inet_pton(AF_INET, dst_ip_str, &dst_net) != 1){
         printf("Ping : %s : bad ip `%s`\n", node->node_name, dst_ip_str);
@@ -146,14 +169,18 @@ static void send_one_request(Node* node, char* dst_ip_str, short seq, bool corru
         hdr->checksum ^= htons(1);
     }
 
-    demote_packet_to_layer3(node, (char*)buf, sizeof(buf),
-                            ICMP_PROTO, dst_host);
+    demote_packet_to_layer3_ttl(node, (char*)buf, sizeof(buf),
+                                ICMP_PROTO, dst_host, ttl);
 }
 
 void ping_send_request(Node* node, char* dst_ip_str, short seq){
-    send_one_request(node, dst_ip_str, seq, false);
+    send_one_request(node, dst_ip_str, seq, false, 0);
+}
+
+void ping_send_request_ttl(Node* node, char* dst_ip_str, short seq, unsigned char ttl){
+    send_one_request(node, dst_ip_str, seq, false, ttl);
 }
 
 void ping_send_request_bad_checksum(Node* node, char* dst_ip_str, short seq){
-    send_one_request(node, dst_ip_str, seq, true);
+    send_one_request(node, dst_ip_str, seq, true, 0);
 }

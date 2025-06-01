@@ -11,6 +11,7 @@
 #include "../utils.h"
 #include "../Layer2/layer2.h"
 #include "layer3.h"
+#include "icmp.h"
 #include "pmtu.h"
 
 // ch12: pin the IPv4 header at exactly 20 bytes (RFC 791).
@@ -34,13 +35,56 @@ void ip_hdr_ntoh(IpHdr* h){
     h->dst_ip         = ntohl(h->dst_ip);
 }
 
+// RFC 792 Time Exceeded to the sender of `ip_hdr` (a received
+// header, host order, `hdr_size` bytes, followed by its payload).
+// RFC 1812 4.3.2.7: never about an ICMP error (only echo request and
+// reply among ICMP messages here) nor about a fragment past the first.
+static void l3_send_time_exceeded(Node* node, IpHdr* ip_hdr, size_t hdr_size){
+    const unsigned char* l4 = (const unsigned char*)ip_hdr + hdr_size;
+    size_t l4_size = ip_hdr->total_length - hdr_size;
+    if(IP_HDR_FRAG_OFF(ip_hdr) != 0){
+        return;
+    }
+    if(ip_hdr->protocol == ICMP_PROTO
+       && (l4_size < 1 || (l4[0] != ICMP_ECHO_REQUEST && l4[0] != ICMP_ECHO_REPLY))){
+        return;
+    }
+    unsigned char msg[ICMP_ERROR_HDR_SIZE + 60 + 8];
+    size_t quote = l4_size < 8 ? l4_size : 8;
+    memset(msg, 0, ICMP_ERROR_HDR_SIZE);
+    msg[0] = ICMP_TIME_EXCEEDED;
+    msg[1] = 0;                                   // TTL exceeded in transit
+    // The original header as it was on the wire: L3 turned the fixed
+    // part to host order (the checksum and any options stay raw).
+    IpHdr wire = *ip_hdr;
+    ip_hdr_hton(&wire);
+    memcpy(msg + ICMP_ERROR_HDR_SIZE, &wire, sizeof(IpHdr));
+    memcpy(msg + ICMP_ERROR_HDR_SIZE + sizeof(IpHdr), (const char*)ip_hdr + sizeof(IpHdr),
+           hdr_size - sizeof(IpHdr));
+    memcpy(msg + ICMP_ERROR_HDR_SIZE + hdr_size, l4, quote);
+    size_t len = ICMP_ERROR_HDR_SIZE + hdr_size + quote;
+    unsigned short sum = htons(icmp_checksum(msg, len));
+    memcpy(msg + 2, &sum, 2);
+    demote_packet_to_layer3(node, (char*)msg, len, ICMP_PROTO, ip_hdr->src_ip);
+}
+
 // Forwarding a received (host-order) header: TTL-1, back to wire
-// order, fresh checksum. Returns false if TTL expired (drop).
+// order, fresh checksum. Returns false if the datagram is dropped:
+// forwarding off or the TTL expired (then Time Exceeded goes
+// back to the sender; the reference only dropped it).
 static bool l3_prepare_forward(Node* node, IpHdr* ip_hdr, size_t hdr_size){
-    if(ip_hdr->ttl <= 1){
-        printf("L3 drop : %s : TTL expired\n", node->node_name);
+    if(!node->node_nw_prop.ip_forward){
+        node->node_nw_prop.fwd_refused++;
+        printf("L3 drop : %s : not for us and forwarding is off\n", node->node_name);
         return false;
     }
+    if(ip_hdr->ttl <= 1){
+        printf("L3 drop : %s : TTL expired\n", node->node_name);
+        node->node_nw_prop.fwd_ttl_expired++;
+        l3_send_time_exceeded(node, ip_hdr, hdr_size);
+        return false;
+    }
+    node->node_nw_prop.fwd_packets++;
     ip_hdr->ttl--;
     // TTL is inside the checksummed header, so recompute. RFC 1624's
     // incremental update is the known optimisation; a full pass over
@@ -547,6 +591,7 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
     L3Route* route = l3rib_lookup_lpm(NODE_RT_TABLE(node), ip_hdr->dst_ip);
     if(!route){
         printf("L3 drop : %s : no route for dst\n", node->node_name);
+        node->node_nw_prop.fwd_no_route++;
         return;
     }
 
@@ -656,12 +701,21 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
 // L4 instead of sending it out the wire.
 void demote_packet_to_layer3(Node* node, char* pkt, size_t pkt_size,
                              int protocol_number, unsigned int dest_ip_address){
+    demote_packet_to_layer3_ttl(node, pkt, pkt_size, protocol_number, dest_ip_address, 0);
+}
+
+void demote_packet_to_layer3_ttl(Node* node, char* pkt, size_t pkt_size,
+                                 int protocol_number, unsigned int dest_ip_address,
+                                 unsigned char ttl){
     // ch34: build a template IP header carrying just src_ip,
     // dst_ip, protocol, ttl. Per-fragment fields (id, total_length,
     // flags, frag_offset, checksum) get filled in by
     // emit_one_ip_fragment.
     IpHdr tmpl;
     initialize_ip_hdr(&tmpl);
+    if(ttl){
+        tmpl.ttl = ttl;
+    }
     tmpl.protocol = (unsigned char)protocol_number;
     tmpl.dst_ip   = dest_ip_address;
 

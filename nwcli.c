@@ -984,12 +984,33 @@ static CliCmd cmd_show_node_pick_src = {
     .help     = "show which src IP node_pick_src_ip would choose for <dst-ip>",
     .children = show_node_pick_src_ip_children,
 };
+// `show node <n> l3-stats`, the forwarding
+// counters SamOS's `route` prints.
+static int show_node_l3_stats_handler(int argc, char** argv){
+    Node* node = argc == 1 ? find_node_by_name(argv[0]) : 0;
+    if(!node){
+        fprintf(stderr, "show node l3-stats: no such node\n");
+        return 1;
+    }
+    NodeNwProp* p = &node->node_nw_prop;
+    printf("L3 stats : %s : forward=%s forwarded=%lu ttl_expired=%lu refused=%lu no_route=%lu\n",
+           node->node_name, p->ip_forward ? "on" : "off", p->fwd_packets,
+           p->fwd_ttl_expired, p->fwd_refused, p->fwd_no_route);
+    return 0;
+}
+static CliCmd cmd_show_node_l3_stats = {
+    .name     = "l3-stats",
+    .handler  = show_node_l3_stats_handler,
+    .help     = "forwarding counters",
+};
+
 static CliCmd* show_node_name_children[] = {
     &cmd_show_node_arp,
     &cmd_show_node_mac,
     &cmd_show_node_route,
     &cmd_show_node_tcp,
     &cmd_show_node_pick_src,
+    &cmd_show_node_l3_stats,
     0,
 };
 
@@ -1400,7 +1421,29 @@ static CliCmd cmd_run_node_drop_tcp = {
     .children = run_node_drop_tcp_skip_children,
 };
 
+// `run node <n> ping-ttl <ip> <ttl>`: one echo request with this IP
+// TTL. Too small for the path, a router answers Time Exceeded.
+static int run_node_ping_ttl_handler(int argc, char** argv){
+    Node* node = argc == 3 ? sb_node(argv[0]) : 0;
+    int ttl = argc == 3 ? atoi(argv[2]) : 0;
+    if(!node || ttl < 1 || ttl > 255){
+        fprintf(stderr, "run node ping-ttl: expected <node> <ip> <1..255>\n");
+        return 1;
+    }
+    ping_send_request_ttl(node, argv[1], 1, (unsigned char)ttl);
+    usleep(300 * 1000);
+    return 0;
+}
+SB_ARG(cmd_run_node_ping_ttl_ttl, "<ttl>", "IP TTL 1..255", run_node_ping_ttl_handler, 0);
+SB_KIDS(run_node_ping_ttl_ttl_children, &cmd_run_node_ping_ttl_ttl);
+SB_ARG(cmd_run_node_ping_ttl_ip, "<ip>", "destination IP", 0, run_node_ping_ttl_ttl_children);
+SB_KIDS(run_node_ping_ttl_ip_children, &cmd_run_node_ping_ttl_ip);
+static CliCmd cmd_run_node_ping_ttl = {
+    .name = "ping-ttl", .help = "one ping with this IP TTL", .children = run_node_ping_ttl_ip_children,
+};
+
 static CliCmd* run_node_name_children[] = {
+    &cmd_run_node_ping_ttl,
     &cmd_run_node_drop_tcp,
     &cmd_run_node_resolve,
     &cmd_run_node_ping,
@@ -1787,7 +1830,32 @@ static CliCmd cmd_config_http_listen = {
     .children = config_http_listen_port_children,
 };
 
+// config node <node> ip-forward <on|off>
+static int config_ip_forward_handler(int argc, char** argv){
+    Node* node = argc == 2 ? find_node_by_name(argv[0]) : 0;
+    if(!node || (strcmp(argv[1], "on") != 0 && strcmp(argv[1], "off") != 0)){
+        fprintf(stderr, "config: expected <node> ip-forward <on|off>\n");
+        return 1;
+    }
+    node->node_nw_prop.ip_forward = strcmp(argv[1], "on") == 0;
+    printf("L3 config : %s : ip-forward %s\n", node->node_name, argv[1]);
+    return 0;
+}
+static CliCmd cmd_config_ip_forward_val = {
+    .name     = "<on|off>",
+    .capture  = true,
+    .handler  = config_ip_forward_handler,
+    .help     = "route datagrams for other hosts or not",
+};
+static CliCmd* config_ip_forward_val_children[] = { &cmd_config_ip_forward_val, 0 };
+static CliCmd cmd_config_ip_forward = {
+    .name     = "ip-forward",
+    .help     = "the node's forwarding switch",
+    .children = config_ip_forward_val_children,
+};
+
 static CliCmd* config_node_name_children[] = {
+    &cmd_config_ip_forward,
     &cmd_config_interface,
     &cmd_config_route,
     &cmd_config_tcp_listen,
