@@ -287,7 +287,11 @@ L3Route* l3rib_lookup_lpm(RtTable* rt_table, unsigned int dest_ip){
             default_route = r;
             continue;
         }
-        if(strncmp(subnet, r->dest, strlen(subnet)) == 0
+        // The whole prefix string. Upstream compared
+        // strlen(subnet) bytes, so a route's dest that merely began
+        // with the masked address matched: 10.1.0.1 took the route
+        // for 10.1.0.10/32 (or 10.1.0.100/32).
+        if(strncmp(subnet, r->dest, 16) == 0
            && r->mask >= longest_mask){
             longest_mask = r->mask;
             lpm          = r;
