@@ -496,7 +496,31 @@ Tcb* tcp_listen_tcb(Node* node, unsigned short port, TcpOnData on_data){
     return tcp_listen_with_handler(node, port, on_data) ? tcb_find_listener(node, port) : 0;
 }
 
+// A listener going away. Its passive children point at
+// it (Tcb.listener) and it is freed on the next tick: forget it in every
+// child, and reset the ones no socket has taken yet (still in
+// SYN_RECEIVED), which nobody would ever accept or free.
+static void tcp_drop_children(Tcb* l){
+    GlThread* cur = 0;
+    ITERATE_GLTHREAD_BEGIN(&g_tcbs, cur){
+        Tcb* c = glue_to_tcb(cur);
+        if(c->listener != l) continue;
+        c->listener = 0;
+        if(c->app || c->orphan) continue;
+        if(c->state != TCP_CLOSED){
+            send_rst_segment(c->node, c->local_ip, c->local_port, c->remote_ip, c->remote_port,
+                             c->snd_nxt, c->rcv_nxt, true);
+            c->state  = TCP_CLOSED;
+            c->rto_at = 0;
+        }
+        tcp_release(c);
+    } ITERATE_GLTHREAD_END(&g_tcbs, cur);
+}
+
 void tcp_close_tcb(Tcb* t){
+    if(t->state == TCP_LISTEN){
+        tcp_drop_children(t);
+    }
     if(t->state == TCP_ESTABLISHED){
         t->state = TCP_FIN_WAIT_1;
         printf("TCP close : %s : ESTABLISHED -> FIN_WAIT_1\n", t->node->node_name);
@@ -674,7 +698,14 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
     // The third leg may carry data (and a FIN); it goes
     // on to the synchronized-state handling below instead of being
     // dropped by a return.
-    if(tcb->state == TCP_SYN_RECEIVED && (flags & TCP_ACK) && ack == tcb->iss + 1){
+    // Not while the listener's accept queue is full; the
+    // child stays in SYN_RECEIVED, its timer sends the SYN-ACK again and
+    // the peer's ACK of that (or its data) completes the handshake then.
+    if(tcb->state == TCP_SYN_RECEIVED && (flags & TCP_ACK) && ack == tcb->iss + 1
+       && tcb->listener && !tcp_app_accept_room(tcb->listener)){
+        printf("TCP recv : %s : accept queue full, third leg from port %u ignored\n",
+               node->node_name, tcb->remote_port);
+    } else if(tcb->state == TCP_SYN_RECEIVED && (flags & TCP_ACK) && ack == tcb->iss + 1){
         tcb->state = TCP_ESTABLISHED;
         // ch40: handshake-consumed byte is now acked.
         tcb->snd_una     = ack;
@@ -715,6 +746,16 @@ static void tcp_recv(Node* node, Interface* iif, IpHdr* ip_hdr,
     if(tcb->state == TCP_SYN_SENT || tcb->state == TCP_SYN_RECEIVED || tcb->state == TCP_CLOSED){
         printf("TCP recv : %s : state=%s seq=%u ack=%u flags=0x%02x (no-op)\n",
                node->node_name, state_name(tcb->state), seq, ack, flags);
+        return;
+    }
+    // A SYN in a synchronized state is the peer's
+    // handshake again (its SYN-ACK resent because our third leg was not
+    // taken): drop it and ACK what we expect (RFC 793, an unacceptable
+    // segment), which lets the peer finish.
+    if(flags & TCP_SYN){
+        printf("TCP recv : %s : SYN seq=%u in state=%s -> ACK\n",
+               node->node_name, seq, state_name(tcb->state));
+        send_bare_ack(tcb);
         return;
     }
 
@@ -1151,12 +1192,83 @@ void tcp_dump(Node* node){
 // simulator has no sockets; the CLI drives TCBs by 4-tuple and the
 // ch29 on_data handler takes received bytes at once, so the window is
 // ch41's g_tcp_rwnd and an event has nobody to wake.
+//
+// One event matters: a passive child whose handshake finished is, in
+// SamOS, a socket on the listener's accept queue (Tcb.app set). Here
+// the CLI owns it from then on (by 4-tuple), so app points at the TCB
+// itself: tcp_drop_children then resets only the half-open
+// children, as SamOS does, and leaves the established ones alone.
 void tcp_event(Tcb* tcb, int ev){
-    (void)tcb;
-    (void)ev;
+    if(ev == TCP_EV_ESTABLISHED && tcb->listener && !tcb->app){
+        tcb->app = tcb;
+    }
 }
 
 unsigned int tcp_app_window(Tcb* tcb){
     (void)tcb;
     return g_tcp_rwnd;
+}
+
+// SamOS asks the listening socket whether its accept
+// queue (backlog) has room. Here the queue is the listener's children
+// still in ESTABLISHED or CLOSE_WAIT (nothing accept()s them; the CLI
+// closing one makes room), against a backlog set per (node, port) with
+// `config node X tcp-backlog <port> <n>`; no backlog set: always room.
+#define TCP_BACKLOG_SLOTS 8
+static struct { Node* node; unsigned short port; unsigned int backlog; } g_backlog[TCP_BACKLOG_SLOTS];
+
+bool tcp_set_backlog(Node* node, unsigned short port, unsigned int backlog){
+    int free_slot = -1;
+    for(int i = 0; i < TCP_BACKLOG_SLOTS; i++){
+        if(g_backlog[i].node == node && g_backlog[i].port == port){
+            free_slot = i;
+            break;
+        }
+        if(!g_backlog[i].node && free_slot < 0){
+            free_slot = i;
+        }
+    }
+    if(free_slot < 0){
+        return false;
+    }
+    g_backlog[free_slot].node    = backlog ? node : 0;
+    g_backlog[free_slot].port    = port;
+    g_backlog[free_slot].backlog = backlog;
+    printf("TCP listen : %s : port %u backlog %u\n", node->node_name, port, backlog);
+    return true;
+}
+
+bool tcp_app_accept_room(Tcb* listener){
+    unsigned int backlog = 0;
+    for(int i = 0; i < TCP_BACKLOG_SLOTS; i++){
+        if(g_backlog[i].node == listener->node && g_backlog[i].port == listener->local_port){
+            backlog = g_backlog[i].backlog;
+        }
+    }
+    if(!backlog){
+        return true;
+    }
+    unsigned int queued = 0;
+    GlThread* cur = 0;
+    ITERATE_GLTHREAD_BEGIN(&g_tcbs, cur){
+        Tcb* c = glue_to_tcb(cur);
+        if(c->listener == listener
+           && (c->state == TCP_ESTABLISHED || c->state == TCP_CLOSE_WAIT)){
+            queued++;
+        }
+    } ITERATE_GLTHREAD_END(&g_tcbs, cur);
+    return queued < backlog;
+}
+
+// `run node X tcp-unlisten <port>`, SamOS's close() of
+// a listening socket.
+bool tcp_unlisten(Node* node, unsigned short port){
+    Tcb* l = tcb_find_listener(node, port);
+    if(!l){
+        printf("TCP close : %s : no listener on port %u\n", node->node_name, port);
+        return false;
+    }
+    printf("TCP close : %s : listener on port %u closed\n", node->node_name, port);
+    tcp_close_tcb(l);
+    return true;
 }

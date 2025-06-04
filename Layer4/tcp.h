@@ -192,6 +192,10 @@ enum {
 void         tcp_event(Tcb* tcb, int ev);
 // Room the application has for received data (the window advertised).
 unsigned int tcp_app_window(Tcb* tcb);
+// Whether a listener can take one more connection (its
+// accept queue has room); if not, the third leg is ignored and the
+// handshake is finished later, when the SYN-ACK is sent again.
+bool         tcp_app_accept_room(Tcb* listener);
 
 Tcb*   tcp_open(Node* node, unsigned int dst_ip_host, unsigned short dst_port);
 Tcb*   tcp_listen_tcb(Node* node, unsigned short port, TcpOnData on_data);
@@ -208,5 +212,13 @@ void   tcp_release(Tcb* tcb);
 void   tcp_timer(void);
 // Retransmission timeouts so far (net_info, the shell's netstat).
 extern unsigned long tcp_rto_count;
+
+// ---- SamTcpIp: what the CLI needs in place of SamOS's sockets ------------
+// The accept queue's size for the listener on (node,
+// port); 0: no limit (the default). See tcp_app_accept_room.
+bool tcp_set_backlog(Node* node, unsigned short port, unsigned int backlog);
+// Close the listener on (node, port), as SamOS's close()
+// of a listening socket does: its half-open children are reset.
+bool tcp_unlisten(Node* node, unsigned short port);
 
 #endif

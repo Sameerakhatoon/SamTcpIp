@@ -1442,7 +1442,28 @@ static CliCmd cmd_run_node_ping_ttl = {
     .name = "ping-ttl", .help = "one ping with this IP TTL", .children = run_node_ping_ttl_ip_children,
 };
 
+// `run node <n> tcp-unlisten <port>`: close a listener.
+static int run_node_tcp_unlisten_handler(int argc, char** argv){
+    Node* node = argc == 2 ? sb_node(argv[0]) : 0;
+    int port = argc == 2 ? atoi(argv[1]) : 0;
+    if(!node || port < 1 || port > 65535){
+        return 1;
+    }
+    if(!tcp_unlisten(node, (unsigned short)port)){
+        return 1;
+    }
+    usleep(200 * 1000);
+    return 0;
+}
+SB_ARG(cmd_run_node_tcp_unlisten_port, "<port>", "listening port", run_node_tcp_unlisten_handler, 0);
+SB_KIDS(run_node_tcp_unlisten_port_children, &cmd_run_node_tcp_unlisten_port);
+static CliCmd cmd_run_node_tcp_unlisten = {
+    .name = "tcp-unlisten", .help = "close the listener on <port>",
+    .children = run_node_tcp_unlisten_port_children,
+};
+
 static CliCmd* run_node_name_children[] = {
+    &cmd_run_node_tcp_unlisten,
     &cmd_run_node_ping_ttl,
     &cmd_run_node_drop_tcp,
     &cmd_run_node_resolve,
@@ -1854,7 +1875,39 @@ static CliCmd cmd_config_ip_forward = {
     .children = config_ip_forward_val_children,
 };
 
+// config node <node> tcp-backlog <port> <n>
+static int config_tcp_backlog_handler(int argc, char** argv){
+    Node* node = argc == 3 ? find_node_by_name(argv[0]) : 0;
+    int port = argc == 3 ? atoi(argv[1]) : 0;
+    int n    = argc == 3 ? atoi(argv[2]) : -1;
+    if(!node || port < 1 || port > 65535 || n < 0){
+        fprintf(stderr, "config: expected <node> tcp-backlog <port> <n>\n");
+        return 1;
+    }
+    return tcp_set_backlog(node, (unsigned short)port, (unsigned int)n) ? 0 : 1;
+}
+static CliCmd cmd_config_tcp_backlog_n = {
+    .name     = "<n>",
+    .capture  = true,
+    .handler  = config_tcp_backlog_handler,
+    .help     = "accept queue size (0: no limit)",
+};
+static CliCmd* config_tcp_backlog_n_children[] = { &cmd_config_tcp_backlog_n, 0 };
+static CliCmd cmd_config_tcp_backlog_port = {
+    .name     = "<port>",
+    .capture  = true,
+    .help     = "the listener's port",
+    .children = config_tcp_backlog_n_children,
+};
+static CliCmd* config_tcp_backlog_port_children[] = { &cmd_config_tcp_backlog_port, 0 };
+static CliCmd cmd_config_tcp_backlog = {
+    .name     = "tcp-backlog",
+    .help     = "accept queue size of a listener",
+    .children = config_tcp_backlog_port_children,
+};
+
 static CliCmd* config_node_name_children[] = {
+    &cmd_config_tcp_backlog,
     &cmd_config_ip_forward,
     &cmd_config_interface,
     &cmd_config_route,
