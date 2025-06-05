@@ -69,12 +69,11 @@ void init_udp_socket(Node* node){
     node->udp_sock_fd = fd;
 }
 
-// Static scratch buffers used by the (single) receiver thread and
-// by the sender. Sender shares: only valid while no other call to
-// send_pkt_out is in flight, which is fine for our single-threaded
-// CLI driver.
+// Static scratch buffer used by the (single) receiver thread. The
+// sender's is on its stack (send_pkt_out): the CLI, the receiver
+// thread and the stack timer thread all send, and a shared
+// buffer let one overwrite another's frame and aux header.
 static char recv_buffer[MAX_PACKET_BUFFER_SIZE];
-static char send_buffer[MAX_PACKET_BUFFER_SIZE];
 
 // Strip the IF_NAME_SIZE aux header from the front of an incoming
 // datagram, look up the matching local Interface by name, and
@@ -196,6 +195,7 @@ int send_pkt_out(char* pkt, size_t pkt_size, Interface* oif){
                          ? &oif->link->intf2
                          : &oif->link->intf1;
 
+    char send_buffer[MAX_PACKET_BUFFER_SIZE];
     memset(send_buffer, 0, MAX_PACKET_BUFFER_SIZE);
     strncpy(send_buffer, peer_intf->if_name, IF_NAME_SIZE);
     send_buffer[IF_NAME_SIZE - 1] = '\0';
