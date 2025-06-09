@@ -64,9 +64,21 @@ typedef struct TcpHdr {
 #define TCP_FIN_WAIT_2      6
 #define TCP_CLOSE_WAIT      7
 #define TCP_LAST_ACK        8
-// We collapse TIME_WAIT directly to CLOSED in ch26 (no 2*MSL
-// timer; documented). CLOSING is the simultaneous-close path
-// we don't exercise yet.
+// ch26 collapsed TIME_WAIT directly to CLOSED (no 2*MSL timer).
+// TIME_WAIT for tcp_time_wait_ms, and CLOSING,
+// the simultaneous close.
+#define TCP_TIME_WAIT       9
+#define TCP_CLOSING         10
+
+// One out-of-order segment the receiver keeps
+// until the hole before it fills.
+typedef struct TcpOoo {
+    unsigned int    seq;
+    unsigned int    len;
+    bool            fin;
+    unsigned char*  data;
+} TcpOoo;
+#define TCP_OOO_MAX         16
 
 typedef struct Tcb Tcb;
 // ch29: per-TCB data callback. Called when ESTABLISHED + data
@@ -117,6 +129,25 @@ struct Tcb {
     void*           app;            // the socket (net/socket.c)
     bool            orphan;         // the socket let go: free when closed
     unsigned long   orphan_since;
+    // RFC 6298 RTT estimate, one segment timed at a
+    // time (Karn: never a retransmitted one).
+    unsigned int    srtt8;          // SRTT * 8, ms
+    unsigned int    rttvar4;        // RTTVAR * 4, ms
+    bool            rtt_seen;       // a sample came: srtt8, rttvar4 valid
+    bool            rtt_timing;
+    unsigned int    rtt_seq;        // the ACK that ends the timed segment
+    unsigned long   rtt_start;
+    // RFC 5681 fast retransmit, RFC 6582 NewReno
+    // recovery, RFC 3042 limited transmit.
+    int             dupacks;
+    bool            in_recovery;
+    bool            after_rto;      // no fast retransmit below `recover`
+    unsigned int    recover;        // snd_max when recovery (or an RTO) began
+    // Out-of-order segments, sorted by seq.
+    TcpOoo          ooo[TCP_OOO_MAX];
+    int             ooo_n;
+    // When TIME_WAIT ends (net_now_ms).
+    unsigned long   tw_until;
 };
 GLTHREAD_TO_STRUCT(glue_to_tcb, Tcb, glue);
 
@@ -177,10 +208,21 @@ void tcp_set_rwnd(unsigned short rwnd);
 
 #define TCP_OUR_MSS         1460        // MTU 1500 - 40
 #define TCP_SNDBUF_SIZE     16384
-#define TCP_RTO_INIT_MS     1000        // RFC 6298
+#define TCP_RTO_INIT_MS     1000        // RFC 6298, before any RTT sample
+// RFC 6298 asks for at least 1 s; QEMU guests on one
+// host see RTTs of a few ms, so Linux's 200 ms. The clock ticks at
+// 100 Hz (G).
+#define TCP_RTO_MIN_MS      200
 #define TCP_RTO_MAX_MS      8000
+#define TCP_CLOCK_G_MS      10
 #define TCP_MAX_RETRIES     8
-#define TCP_ORPHAN_MS       60000
+#define TCP_ORPHAN_MS       60000       // default of tcp_orphan_ms
+// 2 * MSL scaled down for QEMU (RFC 793: 4 min).
+#define TCP_TIME_WAIT_MS    2000        // default of tcp_time_wait_ms
+#define TCP_TIME_WAIT_MAX   32          // more: the oldest ends early
+// Boot options samos.tcp_time_wait_ms and samos.tcp_orphan_ms.
+extern unsigned long tcp_time_wait_ms;
+extern unsigned long tcp_orphan_ms;
 
 // Events for the application (the kernel defines tcp_event).
 enum {
@@ -212,6 +254,15 @@ void   tcp_release(Tcb* tcb);
 void   tcp_timer(void);
 // Retransmission timeouts so far (net_info, the shell's netstat).
 extern unsigned long tcp_rto_count;
+// Fast retransmits (3 duplicate ACKs, NewReno partial ACKs),
+// out-of-order segments kept, orphans freed by tcp_orphan_ms.
+extern unsigned long tcp_fast_rtx_count;
+extern unsigned long tcp_ooo_count;
+extern unsigned long tcp_orphan_count;
+// Feed one RTT sample (ms) to the RFC 6298 estimator;
+// tcp_rto_value is the RTO it gives (no backoff).
+void         tcp_rtt_sample(Tcb* tcb, unsigned int rtt_ms);
+unsigned int tcp_rto_value(Tcb* tcb);
 
 // ---- SamTcpIp: what the CLI needs in place of SamOS's sockets ------------
 // The accept queue's size for the listener on (node,

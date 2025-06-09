@@ -1032,7 +1032,8 @@ static CliCmd cmd_show_node = {
 static int show_tcp_stats_handler(int argc, char** argv){
     (void)argc;
     (void)argv;
-    printf("TCP stats : rto=%lu\n", tcp_rto_count);
+    printf("TCP stats : rto=%lu fast_rtx=%lu ooo_kept=%lu orphans_freed=%lu\n",
+           tcp_rto_count, tcp_fast_rtx_count, tcp_ooo_count, tcp_orphan_count);
     return 0;
 }
 static CliCmd cmd_show_tcp_stats = {
@@ -1462,7 +1463,68 @@ static CliCmd cmd_run_node_tcp_unlisten = {
     .children = run_node_tcp_unlisten_port_children,
 };
 
+// `run node <n> tcp-send-burst <ip> <dport> <count> <bytes>`: <count>
+// sends of <bytes> each, back to back (tests: the duplicate ACKs
+// must come back before the RTO, 200 ms at least, expires; tcp-send's
+// 200 ms pause per command is too slow for that).
+static int run_node_tcp_send_burst_handler(int argc, char** argv){
+    Node* node = argc == 5 ? sb_node(argv[0]) : 0;
+    unsigned int dst_net = 0;
+    if(!node || inet_pton(AF_INET, argv[1], &dst_net) != 1){
+        return 1;
+    }
+    int dport = atoi(argv[2]), count = atoi(argv[3]), bytes = atoi(argv[4]);
+    if(dport < 1 || dport > 65535 || count < 1 || bytes < 1 || bytes > 1400
+       || count * bytes > TCP_SNDBUF_SIZE){
+        fprintf(stderr, "tcp-send-burst: 1..65535, count * bytes <= %d, bytes <= 1400\n",
+                TCP_SNDBUF_SIZE);
+        return 1;
+    }
+    char buf[1400];
+    for(int i = 0; i < count; i++){
+        memset(buf, 'a' + (i % 26), (size_t)bytes);
+        if(!tcp_send_data(node, htonl(dst_net), (unsigned short)dport, buf, (size_t)bytes)){
+            return 1;
+        }
+    }
+    usleep(300 * 1000);
+    return 0;
+}
+SB_ARG(cmd_run_node_tcp_send_burst_bytes, "<bytes>", "bytes per send (1..1400)",
+       run_node_tcp_send_burst_handler, 0);
+SB_KIDS(run_node_tcp_send_burst_bytes_children, &cmd_run_node_tcp_send_burst_bytes);
+SB_ARG(cmd_run_node_tcp_send_burst_count, "<count>", "sends", 0, run_node_tcp_send_burst_bytes_children);
+SB_KIDS(run_node_tcp_send_burst_count_children, &cmd_run_node_tcp_send_burst_count);
+SB_ARG(cmd_run_node_tcp_send_burst_dport, "<dport>", "remote port", 0, run_node_tcp_send_burst_count_children);
+SB_KIDS(run_node_tcp_send_burst_dport_children, &cmd_run_node_tcp_send_burst_dport);
+SB_ARG(cmd_run_node_tcp_send_burst_ip, "<ip>", "remote IP", 0, run_node_tcp_send_burst_dport_children);
+SB_KIDS(run_node_tcp_send_burst_ip_children, &cmd_run_node_tcp_send_burst_ip);
+static CliCmd cmd_run_node_tcp_send_burst = {
+    .name = "tcp-send-burst", .help = "<count> sends of <bytes> back to back",
+    .children = run_node_tcp_send_burst_ip_children,
+};
+
+// `run tcp-time-wait <ms>`: SamOS's boot option samos.tcp_time_wait_ms
+// 0 goes straight to CLOSED as before.
+static int run_tcp_time_wait_handler(int argc, char** argv){
+    int ms = argc == 1 ? atoi(argv[0]) : -1;
+    if(ms < 0 || ms > 600000){
+        fprintf(stderr, "run tcp-time-wait: 0..600000 ms\n");
+        return 1;
+    }
+    tcp_time_wait_ms = (unsigned long)ms;
+    printf("TCP time-wait : %lu ms\n", tcp_time_wait_ms);
+    return 0;
+}
+SB_ARG(cmd_run_tcp_time_wait_ms, "<ms>", "TIME_WAIT length", run_tcp_time_wait_handler, 0);
+SB_KIDS(run_tcp_time_wait_ms_children, &cmd_run_tcp_time_wait_ms);
+static CliCmd cmd_run_tcp_time_wait = {
+    .name = "tcp-time-wait", .help = "TIME_WAIT length in ms (2 MSL, scaled down)",
+    .children = run_tcp_time_wait_ms_children,
+};
+
 static CliCmd* run_node_name_children[] = {
+    &cmd_run_node_tcp_send_burst,
     &cmd_run_node_tcp_unlisten,
     &cmd_run_node_ping_ttl,
     &cmd_run_node_drop_tcp,
@@ -1724,6 +1786,7 @@ static CliCmd* run_children[] = {
     &cmd_run_log_level,
     &cmd_run_log_test,
     &cmd_run_sleep,
+    &cmd_run_tcp_time_wait,
     0,
 };
 
