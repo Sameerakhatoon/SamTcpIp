@@ -105,8 +105,27 @@ void l3_test_force_ip_csum_corruption(bool on);
 // i.e. exactly this 100; the TAP link gets 1500 (budget 1480).
 // This constant is the fallback when no egress interface is known.
 #define IP_MAX_FRAG_PAYLOAD     100
-#define IP_REASM_BUF_BYTES      1600    // max reassembled L4 payload
+// Reassembly up to the largest IPv4 datagram (65535 bytes less a
+// 20-byte header; was 1600, upstream's buffer). The buffer grows
+// with the fragments that arrive; at most IP_REASM_MAX sets are open at
+// once (a new one pushes out the oldest) and a set not complete within
+// IP_REASM_TIMEOUT_MS is dropped (l3_timer and every fragment's arrival).
+#define IP_REASM_MAX_BYTES      65515   // max reassembled L4 payload
+#define IP_REASM_MAX            8       // sets in progress at once
 #define IP_REASM_TIMEOUT_MS     30000   // RFC 791 lower bound is 15s; we use 30s
+
+// ICMP errors (Time Exceeded, Destination Unreachable) a router
+// sends go through a token bucket (RFC 1812 4.3.2.8): a burst of
+// ICMP_ERR_BURST, then one per ICMP_ERR_INTERVAL_MS. The ones held
+// back are counted (icmp_err_limited).
+#define ICMP_ERR_BURST          10
+#define ICMP_ERR_INTERVAL_MS    100
+
+// Drop reassembly sets past their deadline. The kernel calls it
+// from its tick (net/net.c, net_stack_timer).
+void l3_timer(void);
+// The number of reassembly sets in progress (the host test).
+int  l3_reasm_count(void);
 
 // ch30: shared source-IP selector. UDP (ch13) and TCP (ch22)
 // each had inline near-identical copies; promote here so a
@@ -194,5 +213,11 @@ void demote_packet_to_layer3(Node* node, char* pkt, size_t pkt_size,
 void demote_packet_to_layer3_ttl(Node* node, char* pkt, size_t pkt_size,
                                  int protocol_number, unsigned int dest_ip_address,
                                  unsigned char ttl);
+// And with DF set when `df` (ping -D, Path MTU tests): such a
+// datagram is never fragmented here; one larger than the egress MTU
+// (or the cached path MTU) is dropped.
+void demote_packet_to_layer3_df(Node* node, char* pkt, size_t pkt_size,
+                                int protocol_number, unsigned int dest_ip_address,
+                                unsigned char ttl, bool df);
 
 #endif

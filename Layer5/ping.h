@@ -22,6 +22,30 @@ void ping_send_request(Node* node, char* dst_ip_str, short seq);
 // The same with this IP TTL (0: the default). With a TTL too
 // small for the path a router answers with Time Exceeded.
 void ping_send_request_ttl(Node* node, char* dst_ip_str, short seq, unsigned char ttl);
+// And with `data_bytes` bytes of data after the echo header (0:
+// the default 16; the filler string repeated) and DF set when `df`.
+void ping_send_request_ex(Node* node, char* dst_ip_str, short seq, unsigned char ttl,
+                          size_t data_bytes, bool df);
+
+// What answered one of our echo requests,
+// for the kernel's waiting ping (net/net.c; the host test has its own).
+// `dst` and `seq` are the request's, `from` who answered, `ttl` the
+// answer's as it arrived, `type` ICMP_ECHO_REPLY, ICMP_TIME_EXCEEDED or
+// ICMP_DEST_UNREACH with its `code` (and `mtu`, Fragmentation Needed's
+// next-hop MTU). An echo reply's data: `bytes` long, `data_ok` when it
+// is the filler the request carried.
+typedef struct PingAnswer {
+    unsigned int   dst;
+    unsigned int   from;
+    unsigned short seq;
+    unsigned char  ttl;
+    unsigned char  type;
+    unsigned char  code;
+    unsigned short mtu;
+    unsigned int   bytes;
+    bool           data_ok;
+} PingAnswer;
+void net_ping_answer(const PingAnswer* a);
 
 // ch11 test hook: same as ping_send_request but XORs one bit of
 // the computed checksum before emit. Receiver MUST drop.

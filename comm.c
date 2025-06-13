@@ -11,6 +11,7 @@
 #include "graph.h"
 #include "pcap.h"
 #include "tap.h"
+#include "Layer3/layer3.h"
 #include "Layer4/tcp.h"
 
 // Forward declarations.
@@ -275,8 +276,9 @@ int pkt_receive(Node* node, Interface* iif, char* pkt, size_t pkt_size){
 
 // ---- the stack timer -------------------------------------
 //
-// SamOS runs tcp_timer (retransmission, TIME_WAIT, orphans) from its
-// 100 Hz kernel tick (net/net.c, net_stack_timer). Here a detached
+// SamOS runs tcp_timer (retransmission, TIME_WAIT, orphans) and l3_timer
+// (IP reassembly deadlines) from its 100 Hz kernel tick (net/net.c,
+// net_stack_timer). Here a detached
 // thread does the same every NET_TIMER_TICK_MS, under the ingress
 // lock so it never runs inside pkt_receive on the other thread.
 #define NET_TIMER_TICK_MS 10
@@ -287,6 +289,7 @@ static void* _net_timer_thread(void* arg){
         usleep(NET_TIMER_TICK_MS * 1000);
         net_stack_lock();
         tcp_timer();
+        l3_timer();                 // reassembly deadlines
         net_stack_unlock();
         fflush(stdout);
     }

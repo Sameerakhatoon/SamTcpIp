@@ -35,25 +35,67 @@ void ip_hdr_ntoh(IpHdr* h){
     h->dst_ip         = ntohl(h->dst_ip);
 }
 
+// The ICMP error token bucket (layer3.h, RFC 1812 4.3.2.8).
+static unsigned int g_icmp_err_tokens = ICMP_ERR_BURST;
+static uint64_t     g_icmp_err_refill_ms;
+
+static bool icmp_err_allowed(Node* node){
+    uint64_t now = net_now_ms();
+    if(now - g_icmp_err_refill_ms >= ICMP_ERR_INTERVAL_MS){
+        uint64_t n = (now - g_icmp_err_refill_ms) / ICMP_ERR_INTERVAL_MS;
+        uint64_t t = g_icmp_err_tokens + n;
+        g_icmp_err_tokens = t > ICMP_ERR_BURST ? ICMP_ERR_BURST : (unsigned int)t;
+        g_icmp_err_refill_ms += n * ICMP_ERR_INTERVAL_MS;
+    }
+    if(!g_icmp_err_tokens){
+        node->node_nw_prop.icmp_err_limited++;
+        return false;
+    }
+    g_icmp_err_tokens--;
+    return true;
+}
+
+// Not a unicast address an error can go to or be about (RFC 1812
+// 4.3.2.7): 0.0.0.0, the limited broadcast, class D and E.
+static bool ip_not_unicast(unsigned int ip){
+    return ip == 0 || ip >= 0xE0000000u;
+}
+
 // RFC 792 Time Exceeded to the sender of `ip_hdr` (a received
 // header, host order, `hdr_size` bytes, followed by its payload).
 // RFC 1812 4.3.2.7: never about an ICMP error (only echo request and
 // reply among ICMP messages here) nor about a fragment past the first.
-static void l3_send_time_exceeded(Node* node, IpHdr* ip_hdr, size_t hdr_size){
+// Any ICMP error of `type` and `code` (Time Exceeded, Destination
+// Unreachable; `mtu` is Fragmentation Needed's next-hop MTU), never
+// about a datagram from or to a broadcast or multicast address, and
+// at most as often as the token bucket allows. True when it was sent.
+static bool l3_send_icmp_error(Node* node, IpHdr* ip_hdr, size_t hdr_size,
+                               unsigned char type, unsigned char code, unsigned short mtu){
     const unsigned char* l4 = (const unsigned char*)ip_hdr + hdr_size;
     size_t l4_size = ip_hdr->total_length - hdr_size;
     if(IP_HDR_FRAG_OFF(ip_hdr) != 0){
-        return;
+        return false;
     }
     if(ip_hdr->protocol == ICMP_PROTO
        && (l4_size < 1 || (l4[0] != ICMP_ECHO_REQUEST && l4[0] != ICMP_ECHO_REPLY))){
-        return;
+        return false;
+    }
+    if(ip_not_unicast(ip_hdr->src_ip) || ip_not_unicast(ip_hdr->dst_ip)){
+        return false;
+    }
+    if(!icmp_err_allowed(node)){
+        printf("L3 : %s : ICMP error type %u rate-limited\n", node->node_name, type);
+        return false;
     }
     unsigned char msg[ICMP_ERROR_HDR_SIZE + 60 + 8];
     size_t quote = l4_size < 8 ? l4_size : 8;
     memset(msg, 0, ICMP_ERROR_HDR_SIZE);
-    msg[0] = ICMP_TIME_EXCEEDED;
-    msg[1] = 0;                                   // TTL exceeded in transit
+    msg[0] = type;
+    msg[1] = code;
+    if(type == ICMP_DEST_UNREACH && code == ICMP_FRAG_NEEDED){
+        msg[6] = (unsigned char)(mtu >> 8);       // RFC 1191 next-hop MTU
+        msg[7] = (unsigned char)mtu;
+    }
     // The original header as it was on the wire: L3 turned the fixed
     // part to host order (the checksum and any options stay raw).
     IpHdr wire = *ip_hdr;
@@ -66,33 +108,107 @@ static void l3_send_time_exceeded(Node* node, IpHdr* ip_hdr, size_t hdr_size){
     unsigned short sum = htons(icmp_checksum(msg, len));
     memcpy(msg + 2, &sum, 2);
     demote_packet_to_layer3(node, (char*)msg, len, ICMP_PROTO, ip_hdr->src_ip);
+    return true;
 }
 
-// Forwarding a received (host-order) header: TTL-1, back to wire
-// order, fresh checksum. Returns false if the datagram is dropped:
-// forwarding off or the TTL expired (then Time Exceeded goes
-// back to the sender; the reference only dropped it).
-static bool l3_prepare_forward(Node* node, IpHdr* ip_hdr, size_t hdr_size){
+static void layer3_pkt_push_down_to_layer2_for_l2routing(
+        Node* node, unsigned int next_hop_ip,
+        char* outgoing_intf_name, char* pkt, size_t pkt_size);
+static void ip_int_to_str(unsigned int ip_host_order, char* out16);
+
+// A forwarded datagram larger than the outgoing MTU, without DF
+// (host-order header, TTL already taken off): split into fragments of
+// at most `mtu` bytes, each payload but the last a multiple of 8. The
+// offsets continue the datagram's own (it may be a fragment already)
+// and every piece but the last of a last fragment has MF. Each piece
+// carries the whole header, options included (RFC 791 copies only the
+// options with the copied flag: SamOS sends none, and passes on
+// what it gets).
+static void l3_forward_fragments(Node* node, IpHdr* ip_hdr, size_t hdr_size, size_t pkt_size,
+                                 unsigned int next_hop, char* oif_name, unsigned int mtu){
+    const char* data   = (const char*)ip_hdr + hdr_size;
+    size_t data_len    = pkt_size - hdr_size;
+    size_t chunk_max   = mtu > hdr_size ? ((mtu - hdr_size) / 8) * 8 : 0;
+    unsigned int base  = IP_HDR_FRAG_OFF(ip_hdr) * 8u;
+    bool last_mf       = IP_HDR_MF(ip_hdr);
+    if(!chunk_max){
+        printf("L3 drop : %s : MTU %u too small to forward\n", node->node_name, mtu);
+        return;
+    }
+    node->node_nw_prop.fwd_fragmented++;
+    size_t chunk;
+    for(size_t off = 0; off < data_len; off += chunk){
+        char buf[ETH_MAX_PAYLOAD];
+        chunk = data_len - off < chunk_max ? data_len - off : chunk_max;
+        bool more = off + chunk < data_len || last_mf;
+        IpHdr* f = (IpHdr*)buf;
+        memcpy(buf, ip_hdr, hdr_size);
+        f->total_length = (unsigned short)(hdr_size + chunk);
+        f->frag_off     = (unsigned short)((more ? IP_FLAG_MF : 0)
+                                           | (((base + off) / 8) & IP_OFFSET_MASK));
+        memcpy(buf + hdr_size, data + off, chunk);
+        printf("IP frag fwd : %s : id=%u off=%zu len=%zu MF=%d\n",
+               node->node_name, ip_hdr->identification, base + off, chunk, more);
+        ip_hdr_hton(f);
+        f->checksum = 0;
+        f->checksum = htons(inet_checksum(f, hdr_size));
+        layer3_pkt_push_down_to_layer2_for_l2routing(node, next_hop, oif_name, buf, hdr_size + chunk);
+    }
+}
+
+// Forward a received datagram (host-order header, `pkt_size` bytes) to
+// `next_hop` (host order) out of `oif_name` (NULL: the interface on
+// next_hop's subnet). Dropped when forwarding is off or the TTL
+// expired (then Time Exceeded goes back to the sender; the
+// reference only dropped it). Larger than the outgoing MTU, it is
+// fragmented, or with DF dropped with Fragmentation Needed (RFC 1191,
+// the MTU in the message). Otherwise TTL-1, back to wire order, fresh
+// checksum, out.
+static void l3_forward(Node* node, IpHdr* ip_hdr, size_t hdr_size, size_t pkt_size,
+                       unsigned int next_hop, char* oif_name){
     if(!node->node_nw_prop.ip_forward){
         node->node_nw_prop.fwd_refused++;
         printf("L3 drop : %s : not for us and forwarding is off\n", node->node_name);
-        return false;
+        return;
     }
     if(ip_hdr->ttl <= 1){
         printf("L3 drop : %s : TTL expired\n", node->node_name);
         node->node_nw_prop.fwd_ttl_expired++;
-        l3_send_time_exceeded(node, ip_hdr, hdr_size);
-        return false;
+        l3_send_icmp_error(node, ip_hdr, hdr_size, ICMP_TIME_EXCEEDED, 0, 0);
+        return;
+    }
+    Interface* oif;
+    if(oif_name){
+        oif = get_node_if_by_name(node, oif_name);
+    } else {
+        char hop[16];
+        ip_int_to_str(next_hop, hop);
+        oif = node_get_matching_subnet_interface(node, hop);
+    }
+    unsigned int mtu = oif && IF_MTU(oif) ? IF_MTU(oif) : ETH_MAX_PAYLOAD;
+    if(mtu > ETH_MAX_PAYLOAD){
+        mtu = ETH_MAX_PAYLOAD;
+    }
+    if(pkt_size > mtu && IP_HDR_DF(ip_hdr)){
+        printf("L3 drop : %s : %zu bytes with DF, MTU %u\n", node->node_name, pkt_size, mtu);
+        node->node_nw_prop.fwd_frag_needed++;
+        l3_send_icmp_error(node, ip_hdr, hdr_size, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED,
+                           (unsigned short)mtu);
+        return;
     }
     node->node_nw_prop.fwd_packets++;
     ip_hdr->ttl--;
+    if(pkt_size > mtu){
+        l3_forward_fragments(node, ip_hdr, hdr_size, pkt_size, next_hop, oif_name, mtu);
+        return;
+    }
     // TTL is inside the checksummed header, so recompute. RFC 1624's
     // incremental update is the known optimisation; a full pass over
     // 20 bytes is fine here.
     ip_hdr_hton(ip_hdr);
     ip_hdr->checksum = 0;
     ip_hdr->checksum = htons(inet_checksum(ip_hdr, hdr_size));
-    return true;
+    layer3_pkt_push_down_to_layer2_for_l2routing(node, next_hop, oif_name, (char*)ip_hdr, pkt_size);
 }
 
 // ch12 test hook: when true, the next demote_packet_to_layer3
@@ -108,18 +224,26 @@ static unsigned short g_ip_id_next = 1;
 
 // ch34: reassembly state. Tracks a single in-flight datagram
 // by 4-tuple (src, dst, proto, id). Buffer indexed by byte
-// offset (frag_offset * 8). `have_bytes` is the number of unique
-// bytes received so far; `expected_bytes` becomes non-zero only
+// offset (frag_offset * 8). `expected_bytes` becomes non-zero only
 // once we've seen the LAST fragment (MF=0) and know the total.
+// Up to IP_REASM_MAX_BYTES (layer3.h): the buffer grows as
+// fragments arrive (`cap`), one bit per 8-byte slot says what is
+// there, `filled` counts the slots; at most IP_REASM_MAX sets, each
+// until its deadline. The ch34 version had a fixed 1600-byte buffer
+// in each entry and counted 8 bytes for a tail of fewer.
+#define IP_REASM_SLOTS  ((IP_REASM_MAX_BYTES + 7) / 8)
 typedef struct ReassemblyEntry {
     unsigned int    src_ip;
     unsigned int    dst_ip;
     unsigned char   protocol;
     unsigned short  ip_id;
-    unsigned char   buf[IP_REASM_BUF_BYTES];
-    bool            slot_filled[IP_REASM_BUF_BYTES / 8];
-    unsigned int    have_bytes;
+    unsigned char*  buf;
+    unsigned int    cap;             // bytes allocated at buf
+    unsigned char   slot_map[(IP_REASM_SLOTS + 7) / 8];
+    unsigned int    filled;          // slots received
+    unsigned int    end;             // the highest byte received + 1
     unsigned int    expected_bytes;  // set when MF=0 fragment arrives
+    uint64_t        deadline_ms;
     Node*           node;
     Interface*      iif;             // first-seen ingress iface
     GlThread        glue;
@@ -128,11 +252,68 @@ GLTHREAD_TO_STRUCT(glue_to_reasm, ReassemblyEntry, glue);
 
 static GlThread g_reasm_list;
 static bool     g_reasm_inited = false;
+static int      g_reasm_count;
 static void ensure_reasm_init(void){
     if(!g_reasm_inited){
         init_glthread(&g_reasm_list);
         g_reasm_inited = true;
     }
+}
+
+static void reasm_free(ReassemblyEntry* r){
+    remove_glthread(&r->glue);
+    g_reasm_count--;
+    free(r->buf);
+    free(r);
+}
+
+int l3_reasm_count(void){
+    return g_reasm_count;
+}
+
+// Drop the sets past their deadline. RFC 792 would have a Time
+// Exceeded (code 1) go back when the first fragment had arrived; SamOS
+// does not send it.
+void l3_timer(void){
+    ensure_reasm_init();
+    uint64_t now = net_now_ms();
+    GlThread* cur = 0;
+    ITERATE_GLTHREAD_BEGIN(&g_reasm_list, cur){
+        ReassemblyEntry* r = glue_to_reasm(cur);
+        if(now >= r->deadline_ms){
+            printf("IP frag drop : %s : reassembly of id=%u timed out\n",
+                   r->node->node_name, r->ip_id);
+            r->node->node_nw_prop.reasm_timeouts++;
+            reasm_free(r);
+        }
+    } ITERATE_GLTHREAD_END(&g_reasm_list, cur);
+}
+
+// Room in r->buf for `need` bytes: grow to the next 4 KiB (at least
+// double), at most IP_REASM_MAX_BYTES. False without memory.
+static bool reasm_room(ReassemblyEntry* r, unsigned int need){
+    if(need <= r->cap){
+        return true;
+    }
+    unsigned int cap = r->cap * 2;
+    if(cap < need){
+        cap = need;
+    }
+    cap = (cap + 4095) & ~4095u;
+    if(cap > IP_REASM_MAX_BYTES){
+        cap = IP_REASM_MAX_BYTES;
+    }
+    unsigned char* b = (unsigned char*)calloc(1, cap);
+    if(!b){
+        return false;
+    }
+    if(r->buf){
+        memcpy(b, r->buf, r->cap);
+        free(r->buf);
+    }
+    r->buf = b;
+    r->cap = cap;
+    return true;
 }
 
 static ReassemblyEntry* reasm_lookup(unsigned int src_ip, unsigned int dst_ip,
@@ -154,7 +335,7 @@ static void emit_one_ip_fragment(Node* node, IpHdr* template_ip,
                                  const char* payload, size_t payload_size,
                                  unsigned short ip_id,
                                  bool more, unsigned short frag_offset_8,
-                                 L3Route* route);
+                                 L3Route* route, bool df);
 
 // ch30: shared source-IP selector. See layer3.h for the contract.
 unsigned int node_pick_src_ip(Node* node, unsigned int dst_ip_host){
@@ -427,6 +608,97 @@ static void promote_pkt_to_layer4(Node* node, Interface* iif, IpHdr* ip_hdr,
            l4_hdr);
 }
 
+// ch34: a fragment for us (host-order header, its payload at l4_hdr):
+// into its reassembly set; the whole datagram goes to L4 once every
+// byte up to the last fragment's end is there. Up to
+// IP_REASM_MAX_BYTES with a growing buffer, a bounded number of sets
+// (the oldest gives way), a deadline per set, and the malformed cases
+// dropped: an empty fragment, a non-final one whose length is not a
+// multiple of 8, data past the end the last fragment gave, two
+// different ends.
+static void l3_reassemble(Node* node, Interface* iif, IpHdr* ip_hdr, size_t hdr_size,
+                          char* l4_hdr, size_t l4_size){
+    unsigned int byte_off = IP_HDR_FRAG_OFF(ip_hdr) * 8u;
+    bool mf = IP_HDR_MF(ip_hdr);
+    if(!l4_size || (mf && (l4_size % 8) != 0) || byte_off + l4_size > IP_REASM_MAX_BYTES){
+        printf("IP frag drop : %s : bad fragment id=%u off=%u len=%zu\n",
+               node->node_name, ip_hdr->identification, byte_off, l4_size);
+        node->node_nw_prop.reasm_dropped++;
+        return;
+    }
+    ensure_reasm_init();
+    l3_timer();
+    ReassemblyEntry* r = reasm_lookup(ip_hdr->src_ip, ip_hdr->dst_ip,
+                                      ip_hdr->protocol, ip_hdr->identification);
+    if(!r){
+        if(g_reasm_count >= IP_REASM_MAX){
+            ReassemblyEntry* old = glue_to_reasm(g_reasm_list.right);   // the oldest
+            printf("IP frag drop : %s : reassembly of id=%u pushed out\n",
+                   node->node_name, old->ip_id);
+            old->node->node_nw_prop.reasm_dropped++;
+            reasm_free(old);
+        }
+        r = (ReassemblyEntry*)calloc(1, sizeof(ReassemblyEntry));
+        if(!r){
+            return;
+        }
+        r->src_ip      = ip_hdr->src_ip;
+        r->dst_ip      = ip_hdr->dst_ip;
+        r->protocol    = ip_hdr->protocol;
+        r->ip_id       = ip_hdr->identification;
+        r->node        = node;
+        r->iif         = iif;
+        r->deadline_ms = net_now_ms() + IP_REASM_TIMEOUT_MS;
+        init_glthread(&r->glue);
+        glthread_add_last(&g_reasm_list, &r->glue);
+        g_reasm_count++;
+    }
+    unsigned int end = byte_off + (unsigned int)l4_size;
+    bool bad = (r->expected_bytes && end > r->expected_bytes)
+            || (!mf && r->expected_bytes && r->expected_bytes != end)
+            || (!mf && r->end > end);
+    if(bad || !reasm_room(r, end)){
+        printf("IP frag drop : %s : reassembly of id=%u: %s\n", node->node_name, r->ip_id,
+               bad ? "inconsistent fragments" : "no memory");
+        node->node_nw_prop.reasm_dropped++;
+        reasm_free(r);
+        return;
+    }
+    memcpy(r->buf + byte_off, l4_hdr, l4_size);
+    for(unsigned int s = byte_off / 8; s < (end + 7) / 8; s++){
+        if(!(r->slot_map[s / 8] & (1u << (s % 8)))){
+            r->slot_map[s / 8] |= (unsigned char)(1u << (s % 8));
+            r->filled++;
+        }
+    }
+    if(end > r->end){
+        r->end = end;
+    }
+    if(!mf){
+        r->expected_bytes = end;
+    }
+    printf("IP frag recv : %s : id=%u off=%u len=%zu MF=%u (have %u/%u slots)\n",
+           node->node_name, ip_hdr->identification, byte_off, l4_size, mf ? 1u : 0u,
+           r->filled, r->expected_bytes ? (r->expected_bytes + 7) / 8 : 0);
+    if(!r->expected_bytes || r->filled != (r->expected_bytes + 7) / 8){
+        return;
+    }
+    // Complete. Hand to L4 with this fragment's header made the whole
+    // datagram's (src, dst and protocol are the set's).
+    printf("IP frag done : %s : id=%u total=%u bytes\n",
+           node->node_name, r->ip_id, r->expected_bytes);
+    node->node_nw_prop.reasm_done++;
+    remove_glthread(&r->glue);
+    init_glthread(&r->glue);
+    g_reasm_count--;
+    ip_hdr->total_length = (unsigned short)(hdr_size + r->expected_bytes > 0xFFFF ? 0xFFFF
+                                            : hdr_size + r->expected_bytes);
+    ip_hdr->frag_off     = 0;
+    promote_pkt_to_layer4(r->node, r->iif, ip_hdr, (char*)r->buf, r->expected_bytes, r->protocol);
+    free(r->buf);
+    free(r);
+}
+
 // Datagrams waiting for ARP. The reference dropped the
 // packet that caused an ARP miss ("upper layers can retransmit"), so
 // the first ping and the first SYN to a new neighbour were lost. Up to
@@ -596,6 +868,13 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
     if(!route){
         printf("L3 drop : %s : no route for dst\n", node->node_name);
         node->node_nw_prop.fwd_no_route++;
+        // A router says so (RFC 1812 5.2.7.1: net unreachable);
+        // a host (forwarding off) drops it quietly as before.
+        if(node->node_nw_prop.ip_forward){
+            if(l3_send_icmp_error(node, ip_hdr, hdr_size, ICMP_DEST_UNREACH, ICMP_UNREACH_NET, 0)){
+                node->node_nw_prop.fwd_unreach_sent++;
+            }
+        }
         return;
     }
 
@@ -611,60 +890,7 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
             char*  l4_hdr  = (char*)ip_hdr + hdr_size;
             size_t l4_size = ip_hdr->total_length - hdr_size;
             if(is_fragment){
-                ensure_reasm_init();
-                ReassemblyEntry* r = reasm_lookup(ip_hdr->src_ip, ip_hdr->dst_ip,
-                                                  ip_hdr->protocol,
-                                                  ip_hdr->identification);
-                if(!r){
-                    r = (ReassemblyEntry*)calloc(1, sizeof(ReassemblyEntry));
-                    if(!r) return;
-                    r->src_ip   = ip_hdr->src_ip;
-                    r->dst_ip   = ip_hdr->dst_ip;
-                    r->protocol = ip_hdr->protocol;
-                    r->ip_id    = ip_hdr->identification;
-                    r->node     = node;
-                    r->iif      = iif;
-                    init_glthread(&r->glue);
-                    glthread_add_last(&g_reasm_list, &r->glue);
-                }
-                unsigned int byte_off = IP_HDR_FRAG_OFF(ip_hdr) * 8u;
-                if(byte_off + l4_size > IP_REASM_BUF_BYTES){
-                    printf("IP frag drop : %s : reasm overflow id=%u\n",
-                           node->node_name, ip_hdr->identification);
-                    return;
-                }
-                memcpy(r->buf + byte_off, l4_hdr, l4_size);
-                // Mark contiguous 8-byte slots; cheap accounting,
-                // overcount is OK because we also check expected.
-                unsigned int slot = byte_off / 8;
-                unsigned int slots_n = (unsigned int)(l4_size + 7) / 8;
-                for(unsigned int i = 0; i < slots_n; i++){
-                    if(slot + i >= IP_REASM_BUF_BYTES / 8) break;
-                    if(!r->slot_filled[slot + i]){
-                        r->slot_filled[slot + i] = true;
-                        r->have_bytes += 8;
-                    }
-                }
-                if(!IP_HDR_MF(ip_hdr)){
-                    r->expected_bytes = byte_off + (unsigned int)l4_size;
-                }
-                printf("IP frag recv : %s : id=%u off=%u len=%zu MF=%u (have %u/%u)\n",
-                       node->node_name, ip_hdr->identification,
-                       byte_off, l4_size, IP_HDR_MF(ip_hdr) ? 1u : 0u,
-                       r->have_bytes, r->expected_bytes);
-                if(r->expected_bytes > 0 && r->have_bytes >= r->expected_bytes){
-                    // Complete. Deliver.
-                    printf("IP frag done : %s : id=%u total=%u bytes\n",
-                           node->node_name, ip_hdr->identification, r->expected_bytes);
-                    // Hand to L4 via a synthesized IpHdr (the original
-                    // first-fragment header is fine since src_ip /
-                    // dst_ip / proto are stable).
-                    promote_pkt_to_layer4(r->node, r->iif, ip_hdr,
-                                          (char*)r->buf, r->expected_bytes,
-                                          r->protocol);
-                    remove_glthread(&r->glue);
-                    free(r);
-                }
+                l3_reassemble(node, iif, ip_hdr, hdr_size, l4_hdr, l4_size);
                 return;
             }
             promote_pkt_to_layer4(node, iif, ip_hdr, l4_hdr, l4_size, ip_hdr->protocol);
@@ -673,28 +899,15 @@ void layer3_pkt_recv_from_layer2(Node* node, Interface* iif,
         // case 2: dst sits in a directly-connected subnet -> this is
         // still a forward (a router hop), so TTL-1 like case 3, then
         // resolve dst MAC and push to L2 (let push-down pick the oif).
-        unsigned int dst_host = ip_hdr->dst_ip;
-        if(!l3_prepare_forward(node, ip_hdr, hdr_size)){
-            return;
-        }
-        layer3_pkt_push_down_to_layer2_for_l2routing(
-                node, dst_host, NULL,
-                (char*)ip_hdr, pkt_size);
+        l3_forward(node, ip_hdr, hdr_size, pkt_size, ip_hdr->dst_ip, NULL);
         return;
     }
 
     // case 3: indirect route -> TTL-1, back to wire order, forward to gw.
-    if(!l3_prepare_forward(node, ip_hdr, hdr_size)){
-        return;
-    }
-
     unsigned int next_hop_ip = 0;
     inet_pton(AF_INET, route->gw_ip, &next_hop_ip);
     next_hop_ip = htonl(next_hop_ip);
-
-    layer3_pkt_push_down_to_layer2_for_l2routing(
-            node, next_hop_ip, route->oif,
-            (char*)ip_hdr, pkt_size);
+    l3_forward(node, ip_hdr, hdr_size, pkt_size, next_hop_ip, route->oif);
 }
 
 // Originate path. Caller hands us a raw L4 payload + dst; we build
@@ -711,6 +924,12 @@ void demote_packet_to_layer3(Node* node, char* pkt, size_t pkt_size,
 void demote_packet_to_layer3_ttl(Node* node, char* pkt, size_t pkt_size,
                                  int protocol_number, unsigned int dest_ip_address,
                                  unsigned char ttl){
+    demote_packet_to_layer3_df(node, pkt, pkt_size, protocol_number, dest_ip_address, ttl, false);
+}
+
+void demote_packet_to_layer3_df(Node* node, char* pkt, size_t pkt_size,
+                                int protocol_number, unsigned int dest_ip_address,
+                                unsigned char ttl, bool df){
     // ch34: build a template IP header carrying just src_ip,
     // dst_ip, protocol, ttl. Per-fragment fields (id, total_length,
     // flags, frag_offset, checksum) get filled in by
@@ -779,9 +998,21 @@ void demote_packet_to_layer3_ttl(Node* node, char* pkt, size_t pkt_size,
     if(per_frag_8 == 0) per_frag_8 = per_frag;
 
     if(pkt_size <= per_frag){
-        // Single-packet fast path: not fragmented.
+        // Single-packet fast path: not fragmented. DF only when
+        // asked for (every datagram SamOS sends has had DF clear: the
+        // template's DF never reached the wire).
         emit_one_ip_fragment(node, &tmpl, pkt, pkt_size,
-                             id, false, 0, route);
+                             id, false, 0, route, df);
+        return;
+    }
+    if(df){
+        printf("L3 originate drop : %s : %zu bytes with DF, room for %zu\n",
+               node->node_name, pkt_size, per_frag);
+        return;
+    }
+    if(pkt_size > IP_REASM_MAX_BYTES){
+        printf("L3 originate drop : %s : %zu bytes, more than an IP datagram holds\n",
+               node->node_name, pkt_size);
         return;
     }
 
@@ -794,7 +1025,7 @@ void demote_packet_to_layer3_ttl(Node* node, char* pkt, size_t pkt_size,
         printf("IP frag emit : %s : id=%u off=%zu len=%zu MF=%d\n",
                node->node_name, id, offset_bytes, this_chunk, more);
         emit_one_ip_fragment(node, &tmpl, pkt + offset_bytes, this_chunk,
-                             id, more, frag_off_8, route);
+                             id, more, frag_off_8, route, false);
         offset_bytes += this_chunk;
         remaining    -= this_chunk;
     }
@@ -806,7 +1037,7 @@ static void emit_one_ip_fragment(Node* node, IpHdr* template_ip,
                                  const char* payload, size_t payload_size,
                                  unsigned short ip_id,
                                  bool more, unsigned short frag_offset_8,
-                                 L3Route* route){
+                                 L3Route* route, bool df){
     char   buf[ETH_MAX_PAYLOAD] = {0};
     IpHdr* ip = (IpHdr*)buf;
     size_t hdr_bytes  = sizeof(IpHdr);
@@ -819,7 +1050,7 @@ static void emit_one_ip_fragment(Node* node, IpHdr* template_ip,
     *ip = *template_ip;
     ip->total_length   = (unsigned short)(hdr_bytes + payload_size);
     ip->identification = ip_id;
-    ip->frag_off       = (unsigned short)((more ? IP_FLAG_MF : 0)
+    ip->frag_off       = (unsigned short)((more ? IP_FLAG_MF : 0) | (df ? IP_FLAG_DF : 0)
                                           | (frag_offset_8 & IP_OFFSET_MASK));
 
     memcpy(buf + hdr_bytes, payload, payload_size);

@@ -35,6 +35,10 @@
 // 8 bytes of its payload, as for Destination Unreachable (pmtu.h).
 #define ICMP_TIME_EXCEEDED    11
 #define ICMP_ERROR_HDR_SIZE   8
+// Destination Unreachable (type 3, pmtu.h) code 0, net
+// unreachable: a router has no route for a datagram it forwards.
+// Code 4 (Fragmentation Needed) is pmtu.h's ICMP_FRAG_NEEDED.
+#define ICMP_UNREACH_NET      0
 
 #pragma pack(push, 1)
 typedef struct IcmpHdr {

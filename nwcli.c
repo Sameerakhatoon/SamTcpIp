@@ -996,6 +996,11 @@ static int show_node_l3_stats_handler(int argc, char** argv){
     printf("L3 stats : %s : forward=%s forwarded=%lu ttl_expired=%lu refused=%lu no_route=%lu\n",
            node->node_name, p->ip_forward ? "on" : "off", p->fwd_packets,
            p->fwd_ttl_expired, p->fwd_refused, p->fwd_no_route);
+    // Router ICMP errors, fragmenting on forward, reassembly.
+    printf("L3 stats : %s : unreach_sent=%lu fragmented=%lu frag_needed=%lu icmp_err_limited=%lu"
+           " reasm_done=%lu reasm_timeouts=%lu reasm_dropped=%lu\n",
+           node->node_name, p->fwd_unreach_sent, p->fwd_fragmented, p->fwd_frag_needed,
+           p->icmp_err_limited, p->reasm_done, p->reasm_timeouts, p->reasm_dropped);
     return 0;
 }
 static CliCmd cmd_show_node_l3_stats = {
@@ -1523,7 +1528,39 @@ static CliCmd cmd_run_tcp_time_wait = {
     .children = run_tcp_time_wait_ms_children,
 };
 
+// `run node <n> ping-size <ip> <bytes>` and `ping-df <ip> <bytes>`: one
+// echo request with <bytes> of data, DF clear or set.
+static int sb_ping_sized(int argc, char** argv, bool df){
+    Node* node = argc == 3 ? sb_node(argv[0]) : 0;
+    int bytes = argc == 3 ? atoi(argv[2]) : 0;
+    if(!node || bytes < 1 || bytes > 65507 - 8){
+        fprintf(stderr, "run node ping-size|ping-df: expected <node> <ip> <1..65499>\n");
+        return 1;
+    }
+    ping_send_request_ex(node, argv[1], 1, 0, (size_t)bytes, df);
+    usleep(500 * 1000);
+    return 0;
+}
+static int run_node_ping_size_handler(int argc, char** argv){ return sb_ping_sized(argc, argv, false); }
+static int run_node_ping_df_handler(int argc, char** argv){ return sb_ping_sized(argc, argv, true); }
+SB_ARG(cmd_run_node_ping_size_bytes, "<bytes>", "echo data bytes", run_node_ping_size_handler, 0);
+SB_KIDS(run_node_ping_size_bytes_children, &cmd_run_node_ping_size_bytes);
+SB_ARG(cmd_run_node_ping_size_ip, "<ip>", "destination IP", 0, run_node_ping_size_bytes_children);
+SB_KIDS(run_node_ping_size_ip_children, &cmd_run_node_ping_size_ip);
+static CliCmd cmd_run_node_ping_size = {
+    .name = "ping-size", .help = "one ping with <bytes> of data", .children = run_node_ping_size_ip_children,
+};
+SB_ARG(cmd_run_node_ping_df_bytes, "<bytes>", "echo data bytes", run_node_ping_df_handler, 0);
+SB_KIDS(run_node_ping_df_bytes_children, &cmd_run_node_ping_df_bytes);
+SB_ARG(cmd_run_node_ping_df_ip, "<ip>", "destination IP", 0, run_node_ping_df_bytes_children);
+SB_KIDS(run_node_ping_df_ip_children, &cmd_run_node_ping_df_ip);
+static CliCmd cmd_run_node_ping_df = {
+    .name = "ping-df", .help = "one ping with <bytes> of data and DF set", .children = run_node_ping_df_ip_children,
+};
+
 static CliCmd* run_node_name_children[] = {
+    &cmd_run_node_ping_size,
+    &cmd_run_node_ping_df,
     &cmd_run_node_tcp_send_burst,
     &cmd_run_node_tcp_unlisten,
     &cmd_run_node_ping_ttl,
@@ -1832,7 +1869,35 @@ static CliCmd cmd_config_intf_ip = {
     .children = config_intf_ip_ip_children,
 };
 
-static CliCmd* config_if_name_children[] = { &cmd_config_l2mode, &cmd_config_intf_ip, 0 };
+// config node <node> interface <if> mtu <bytes>,
+// so a path can have a narrower link past a router (fragmenting on
+// forward, Fragmentation Needed).
+static int config_intf_mtu_handler(int argc, char** argv){
+    Node* node = argc == 3 ? find_node_by_name(argv[0]) : 0;
+    Interface* intf = node ? get_node_if_by_name(node, argv[1]) : 0;
+    int mtu = argc == 3 ? atoi(argv[2]) : 0;
+    if(!intf || mtu < 68 || mtu > ETH_MAX_PAYLOAD){
+        fprintf(stderr, "config: expected <node> interface <if> mtu <68..%d>\n", ETH_MAX_PAYLOAD);
+        return 1;
+    }
+    IF_MTU(intf) = (unsigned int)mtu;
+    printf("Intf mtu : %s/%s set to %d\n", node->node_name, argv[1], mtu);
+    return 0;
+}
+static CliCmd cmd_config_intf_mtu_val = {
+    .name     = "<bytes>",
+    .capture  = true,
+    .handler  = config_intf_mtu_handler,
+    .help     = "IP MTU 68..1500",
+};
+static CliCmd* config_intf_mtu_val_children[] = { &cmd_config_intf_mtu_val, 0 };
+static CliCmd cmd_config_intf_mtu = {
+    .name     = "mtu",
+    .help     = "set the interface MTU",
+    .children = config_intf_mtu_val_children,
+};
+
+static CliCmd* config_if_name_children[] = { &cmd_config_l2mode, &cmd_config_intf_ip, &cmd_config_intf_mtu, 0 };
 
 static CliCmd cmd_config_if_name = {
     .name     = "<if-name>",

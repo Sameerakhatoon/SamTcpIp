@@ -95,6 +95,19 @@ struct NodeNwProp {
     unsigned long fwd_ttl_expired;   // TTL 1 or 0: dropped, Time Exceeded sent
     unsigned long fwd_refused;       // not for us, forwarding off
     unsigned long fwd_no_route;      // no route for the destination
+    // Destination Unreachable (net) sent for a datagram with no
+    // route; datagrams split to fit the outgoing MTU; DF datagrams too
+    // big for it (Fragmentation Needed sent); ICMP errors not sent
+    // because of the rate limit (layer3.c).
+    unsigned long fwd_unreach_sent;
+    unsigned long fwd_fragmented;
+    unsigned long fwd_frag_needed;
+    unsigned long icmp_err_limited;
+    // IP reassembly (layer3.c): datagrams put together, sets
+    // dropped by the timeout, sets dropped for room or as malformed.
+    unsigned long reasm_done;
+    unsigned long reasm_timeouts;
+    unsigned long reasm_dropped;
 };
 
 struct IntfNwProps {
