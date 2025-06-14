@@ -11,6 +11,13 @@ int         cli_run_line(const char* line);
 void        cli_repl(FILE* in);
 
 static CliCmd* g_root = 0;
+static void (*g_before)(void) = 0;
+static void (*g_after)(void)  = 0;
+
+void cli_set_dispatch_hooks(void (*before)(void), void (*after)(void)){
+    g_before = before;
+    g_after  = after;
+}
 
 void cli_set_root(CliCmd* root){
     g_root = root;
@@ -95,7 +102,14 @@ int cli_run_line(const char* line){
     if(n == 0){
         return 0;
     }
-    return walk(g_root, tokens, n, 0, argv, 0);
+    if(g_before){
+        g_before();
+    }
+    int rc = walk(g_root, tokens, n, 0, argv, 0);
+    if(g_after){
+        g_after();
+    }
+    return rc;
 }
 
 // Minimal REPL. Prompt, read a line, dispatch. Quits on EOF or "quit".

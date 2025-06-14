@@ -36,6 +36,10 @@ struct CliCmd {
 };
 
 void cli_set_root(CliCmd* root);
+// Called around every command cli_run_line runs (NULL:
+// nothing). nwcli takes the stack lock here, so a command and the
+// receiver and timer threads do not change TCBs and tables at once.
+void cli_set_dispatch_hooks(void (*before)(void), void (*after)(void));
 int  cli_run_line(const char* line);    // 0 on success, non-zero on parse/handler error
 void cli_repl(FILE* in);                // line-by-line read loop, prints prompt
 

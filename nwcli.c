@@ -69,6 +69,33 @@ void         nwcli_install(Graph* topo);
 // startup); stash it so handlers do not need argv.
 static Graph* g_topo = 0;
 
+// A command runs under the stack lock (comm.c), the
+// one pkt_receive and the timer thread take, so the CLI, the receiver
+// thread and the timer never change a TCB or a table at the same time.
+// The lock is let go while a handler pauses (nwcli_pause_us), which is
+// when the replies it waits for come in.
+static bool g_cmd_holds_lock = false;
+
+static void nwcli_cmd_begin(void){
+    net_stack_lock();
+    g_cmd_holds_lock = true;
+}
+
+static void nwcli_cmd_end(void){
+    g_cmd_holds_lock = false;
+    net_stack_unlock();
+}
+
+static void nwcli_pause_us(useconds_t us){
+    if(g_cmd_holds_lock){
+        net_stack_unlock();
+    }
+    usleep(us);
+    if(g_cmd_holds_lock){
+        net_stack_lock();
+    }
+}
+
 static Node* find_node_by_name(const char* name){
     GlThread* cur = 0;
     ITERATE_GLTHREAD_BEGIN(&g_topo->node_list, cur){
@@ -243,7 +270,7 @@ static int run_send_handler(int argc, char** argv){
         fprintf(stderr, "send_pkt_out failed (rc=%d)\n", rc);
         return 1;
     }
-    usleep(100 * 1000);
+    nwcli_pause_us(100 * 1000);
     return 0;
 }
 
@@ -263,7 +290,7 @@ static int run_node_resolve_arp_handler(int argc, char** argv){
     send_arp_broadcast_request(node, 0, argv[1]);
     // Give the (detached) receiver thread time to process request,
     // send reply, process reply, update ARP table.
-    usleep(200 * 1000);
+    nwcli_pause_us(200 * 1000);
     return 0;
 }
 
@@ -286,7 +313,7 @@ static int run_node_ping_handler(int argc, char** argv){
     }
     for(short seq = 1; seq <= 3; seq++){
         ping_send_request(node, argv[1], seq);
-        usleep(200 * 1000);
+        nwcli_pause_us(200 * 1000);
     }
     return 0;
 }
@@ -310,11 +337,11 @@ static int run_node_ping_bad_handler(int argc, char** argv){
     }
     for(short seq = 1; seq <= 3; seq++){
         ping_send_request(node, argv[1], seq);
-        usleep(200 * 1000);
+        nwcli_pause_us(200 * 1000);
     }
     // One bad-checksum ping. Receiver MUST drop.
     ping_send_request_bad_checksum(node, argv[1], 99);
-    usleep(200 * 1000);
+    nwcli_pause_us(200 * 1000);
     return 0;
 }
 
@@ -334,11 +361,11 @@ static int run_node_ping_bad_ip_handler(int argc, char** argv){
     }
     for(short seq = 1; seq <= 3; seq++){
         ping_send_request(node, argv[1], seq);
-        usleep(200 * 1000);
+        nwcli_pause_us(200 * 1000);
     }
     l3_test_force_ip_csum_corruption(true);
     ping_send_request(node, argv[1], 88);
-    usleep(200 * 1000);
+    nwcli_pause_us(200 * 1000);
     l3_test_force_ip_csum_corruption(false);
     return 0;
 }
@@ -372,7 +399,7 @@ static int run_node_udp_handler(int argc, char** argv){
     for(int i = 0; i < 3; i++){
         udp_send_pkt(node, dst_host, UDP_PRINTER_PORT, UDP_ECHO_PORT,
                      msg, strlen(msg));
-        usleep(200 * 1000);
+        nwcli_pause_us(200 * 1000);
     }
     return 0;
 }
@@ -402,13 +429,13 @@ static int run_node_udp_bad_csum_handler(int argc, char** argv){
     // wait for ARP on the first packet; ping pre-warms.)
     for(short seq = 1; seq <= 3; seq++){
         ping_send_request(node, argv[1], seq);
-        usleep(200 * 1000);
+        nwcli_pause_us(200 * 1000);
     }
     // 1 corrupted UDP send.
     udp_test_force_csum_corruption(true);
     udp_send_pkt(node, dst_host, UDP_PRINTER_PORT, UDP_ECHO_PORT,
                  msg, strlen(msg));
-    usleep(200 * 1000);
+    nwcli_pause_us(200 * 1000);
     udp_test_force_csum_corruption(false);
     return 0;
 }
@@ -546,7 +573,7 @@ static int run_node_tcp_syn_handler(int argc, char** argv){
     }
     // src_port: pick a high ephemeral one.
     tcp_send_syn(node, htonl(dst_net), 33333, (unsigned short)dport);
-    usleep(200 * 1000);
+    nwcli_pause_us(200 * 1000);
     return 0;
 }
 
@@ -576,7 +603,7 @@ static int run_node_tcp_send_handler(int argc, char** argv){
                       argv[3], strlen(argv[3]))){
         return 1;
     }
-    usleep(200 * 1000);
+    nwcli_pause_us(200 * 1000);
     return 0;
 }
 
@@ -605,7 +632,7 @@ static int run_node_tcp_close_handler(int argc, char** argv){
     if(!tcp_close(node, htonl(dst_net), (unsigned short)dport)){
         return 1;
     }
-    usleep(200 * 1000);
+    nwcli_pause_us(200 * 1000);
     return 0;
 }
 
@@ -655,7 +682,7 @@ static int run_node_tcp_send_big_handler(int argc, char** argv){
                       buf, (size_t)nbytes)){
         return 1;
     }
-    usleep(200 * 1000);
+    nwcli_pause_us(200 * 1000);
     return 0;
 }
 
@@ -713,7 +740,7 @@ static int run_node_tcp_connect_handler(int argc, char** argv){
     if(tcp_connect(node, htonl(dst_net), (unsigned short)dport) == 0){
         return 1;
     }
-    usleep(200 * 1000);
+    nwcli_pause_us(200 * 1000);
     return 0;
 }
 
@@ -743,13 +770,13 @@ static int run_node_udp_big_handler(int argc, char** argv){
     // Pre-warm ARP so the first fragment doesn't drop.
     for(short seq = 1; seq <= 2; seq++){
         ping_send_request(node, argv[1], seq);
-        usleep(200 * 1000);
+        nwcli_pause_us(200 * 1000);
     }
     char buf[1500];
     for(int i = 0; i < bytes; i++) buf[i] = (char)('A' + (i % 26));
     udp_send_pkt(node, htonl(dst_net), UDP_PRINTER_PORT, UDP_ECHO_PORT,
                  buf, (size_t)bytes);
-    usleep(300 * 1000);
+    nwcli_pause_us(300 * 1000);
     return 0;
 }
 
@@ -906,7 +933,15 @@ static int run_tap_attach_handler(int argc, char** argv){
 // ch15: `run tap detach` - stops the recv thread, closes the fd.
 static int run_tap_detach_handler(int argc, char** argv){
     (void)argc; (void)argv;
+    // tap_detach joins the TAP thread, which may be
+    // waiting for the stack lock in pkt_receive: let go of it first.
+    if(g_cmd_holds_lock){
+        net_stack_unlock();
+    }
     tap_detach();
+    if(g_cmd_holds_lock){
+        net_stack_lock();
+    }
     return 0;
 }
 
@@ -1399,7 +1434,7 @@ static int run_sleep_handler(int argc, char** argv){
         fprintf(stderr, "run sleep: 0..60000 ms\n");
         return 1;
     }
-    usleep((useconds_t)ms * 1000);
+    nwcli_pause_us((useconds_t)ms * 1000);
     return 0;
 }
 SB_ARG(cmd_run_sleep_ms, "<ms>", "milliseconds", run_sleep_handler, 0);
@@ -1437,7 +1472,7 @@ static int run_node_ping_ttl_handler(int argc, char** argv){
         return 1;
     }
     ping_send_request_ttl(node, argv[1], 1, (unsigned char)ttl);
-    usleep(300 * 1000);
+    nwcli_pause_us(300 * 1000);
     return 0;
 }
 SB_ARG(cmd_run_node_ping_ttl_ttl, "<ttl>", "IP TTL 1..255", run_node_ping_ttl_handler, 0);
@@ -1458,7 +1493,7 @@ static int run_node_tcp_unlisten_handler(int argc, char** argv){
     if(!tcp_unlisten(node, (unsigned short)port)){
         return 1;
     }
-    usleep(200 * 1000);
+    nwcli_pause_us(200 * 1000);
     return 0;
 }
 SB_ARG(cmd_run_node_tcp_unlisten_port, "<port>", "listening port", run_node_tcp_unlisten_handler, 0);
@@ -1492,7 +1527,7 @@ static int run_node_tcp_send_burst_handler(int argc, char** argv){
             return 1;
         }
     }
-    usleep(300 * 1000);
+    nwcli_pause_us(300 * 1000);
     return 0;
 }
 SB_ARG(cmd_run_node_tcp_send_burst_bytes, "<bytes>", "bytes per send (1..1400)",
@@ -1538,7 +1573,7 @@ static int sb_ping_sized(int argc, char** argv, bool df){
         return 1;
     }
     ping_send_request_ex(node, argv[1], 1, 0, (size_t)bytes, df);
-    usleep(500 * 1000);
+    nwcli_pause_us(500 * 1000);
     return 0;
 }
 static int run_node_ping_size_handler(int argc, char** argv){ return sb_ping_sized(argc, argv, false); }
@@ -2092,4 +2127,5 @@ void nwcli_install(Graph* topo){
     network_start_pkt_receiver_thread(topo);
     net_start_timer_thread();       // tcp_timer's tick
     usleep(50 * 1000);
+    cli_set_dispatch_hooks(nwcli_cmd_begin, nwcli_cmd_end);
 }
